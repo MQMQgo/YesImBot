@@ -235,6 +235,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.plugin(PluginService, {
     defaultTimeout: config.defaultTimeout,
   });
+  // Internal legacy compatibility — not required by agent main loop
   ctx.plugin(TraitAnalyzer, {});
   ctx.plugin(SkillRegistry, {
     skillPaths: config.skillPaths,

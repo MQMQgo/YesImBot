@@ -17,9 +17,10 @@ export interface TraitAnalyzerConfig {}
 export const TraitAnalyzerConfigSchema: Schema<TraitAnalyzerConfig> = Schema.object({});
 
 /**
- * Optional analyzer. Not required by the agent main loop.
- * Hook authors may call `trait.analyze()` explicitly when they need
- * trait signals to decide skill loading.
+ * Internal legacy compatibility analyzer. Not required by the agent main loop.
+ * Hook authors may call `trait.analyze()` explicitly if needed, but this is
+ * deprecated and will be removed in a future version.
+ * @deprecated Use Scenario.raw fields directly instead of trait signals.
  */
 export class TraitAnalyzer extends Service<TraitAnalyzerConfig> {
   static inject = ["yesimbot.horizon"];

@@ -2,8 +2,12 @@ import type { Context } from "koishi";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HorizonView } from "../../core/src/services/horizon/types";
+import type { ToolExecutionContext } from "../../core/src/services/plugin/types";
 import type { Percept } from "../../core/src/services/runtime/contracts";
-import { buildAgentContext } from "../../core/src/services/shared/context-factory";
+import {
+  buildAgentContext,
+  buildAgentRoundContext,
+} from "../../core/src/services/shared/context-factory";
 
 function createPercept(overrides: Partial<Percept> = {}): Percept {
   return {
@@ -97,5 +101,50 @@ describe("Trait Removal Baseline", () => {
     expect(toolCtx.scenario?.raw.environment.channelId).toBe("test-channel");
     expect(toolCtx.scenario?.raw.scenarioTimeline).toBeDefined();
     expect(Array.isArray(toolCtx.scenario?.raw.scenarioTimeline.turns)).toBe(true);
+  });
+
+  describe("Legacy Compatibility", () => {
+    it("preserves traits field for legacy traits.find usage", async () => {
+      const percept = createPercept({
+        id: "percept-legacy-001",
+        traceId: "test-trace-legacy-001",
+      });
+
+      const toolCtx = await buildAgentContext(ctx, {
+        platform: percept.platform,
+        channelId: percept.channelId,
+        percept,
+      });
+
+      expect(toolCtx.traits).toBeDefined();
+      expect(typeof toolCtx.traits?.[Symbol.iterator]).toBe("function");
+
+      const sceneSignal = toolCtx.traits?.find((t) => t.dimension === "scene");
+      expect(sceneSignal).toBeUndefined();
+    });
+
+    it("normalizes inbound undefined traits to empty array", async () => {
+      const percept = createPercept({
+        id: "percept-legacy-002",
+        traceId: "test-trace-legacy-002",
+        channelId: "test-channel-legacy-2",
+      });
+
+      const inboundToolCtx = {
+        platform: percept.platform,
+        channelId: percept.channelId,
+        traits: undefined,
+      } as ToolExecutionContext;
+
+      const result = await buildAgentRoundContext(ctx, {
+        platform: percept.platform,
+        channelId: percept.channelId,
+        percept,
+        toolCtx: inboundToolCtx,
+      });
+
+      expect(result.toolCtx.traits).toEqual([]);
+      expect(result.toolCtx.traits).not.toBeUndefined();
+    });
   });
 });

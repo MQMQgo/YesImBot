@@ -105,7 +105,6 @@ export class AgentCore extends Service<AgentCoreConfig> {
     "yesimbot.plugin",
     "yesimbot.prompt",
     "yesimbot.model",
-    "yesimbot.trait",
     "yesimbot.skill",
     "yesimbot.role",
     "yesimbot.hook",

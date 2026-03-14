@@ -16,7 +16,6 @@ import {
 import type { CapabilityState, Percept, RoundContext, Scenario } from "../runtime/contracts";
 import { LoadedSkillSet } from "../skill/loaded-skill-set";
 import type { SkillRegistry } from "../skill/service";
-import type { TraitAnalyzer } from "../trait/service";
 import type { ActiveSkill, TraitSignal } from "./types";
 
 export interface AgentRoundContextResult {
@@ -114,7 +113,7 @@ export async function buildAgentContext(
     );
   }
 
-  let traits: TraitSignal[] = [];
+  const traits: TraitSignal[] = []; // Internal legacy compatibility — always empty in no-Trait path
   const skills: ActiveSkill[] = [];
   const normalizedView = normalizeViewForScenario(view, {
     platform: params.platform,
@@ -125,18 +124,6 @@ export async function buildAgentContext(
     view: normalizedView,
     stimulusSource: buildStimulusSource(params.percept),
   });
-
-  if (normalizedView) {
-    try {
-      const traitAnalyzer = ctx["yesimbot.trait"] as TraitAnalyzer;
-      traits = await traitAnalyzer.analyze(key, scenario);
-    } catch (err) {
-      missingFields.push("traits");
-      logger.warn(
-        `[${params.percept.traceId}] ToolExecutionContext incomplete: failed to analyze traits — ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
 
   if (missingFields.length > 0) {
     logger.warn(

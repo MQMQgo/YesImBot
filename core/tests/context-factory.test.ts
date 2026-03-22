@@ -183,6 +183,58 @@ describe("context factory", () => {
       ]);
       expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("skills"));
     });
+
+    it("reads optional session store via ctx.get without touching direct property access", async () => {
+      const sessionStore = new AgentSessionStore({ logger: () => logger } as never);
+      sessionStore.loadSkill("onebot", "100", {
+        name: "search",
+        description: "search description",
+        guidance: "search guidance",
+        rootDir: "/skills/search",
+        source: "plugin",
+      });
+
+      const directSessionGetter = vi.fn(() => {
+        throw new Error("direct session property access should not be used");
+      });
+
+      const ctx = {
+        logger: () => logger,
+        get: vi.fn((name: string) => {
+          if (name === "yesimbot.session") return sessionStore;
+          return undefined;
+        }),
+        "yesimbot.horizon": {
+          buildView: vi.fn().mockResolvedValue(view),
+        },
+        "yesimbot.skill": {
+          get: vi.fn((name: string) => ({
+            name,
+            description: `${name} description`,
+            guidance: `${name} guidance`,
+            rootDir: `/skills/${name}`,
+            source: "plugin",
+          })),
+        },
+      } as unknown as Context;
+
+      Object.defineProperty(ctx, "yesimbot.session", {
+        configurable: true,
+        get: directSessionGetter,
+      });
+
+      const result = await buildAgentContext(ctx, {
+        platform: "onebot",
+        channelId: "100",
+        percept,
+      });
+
+      expect(result.skills.map((skill) => skill.name)).toEqual(["search"]);
+      expect((ctx.get as ReturnType<typeof vi.fn>).mock.calls).toEqual(
+        expect.arrayContaining([["yesimbot.session"]]),
+      );
+      expect(directSessionGetter).not.toHaveBeenCalled();
+    });
   });
 
   describe("buildHookContext", () => {

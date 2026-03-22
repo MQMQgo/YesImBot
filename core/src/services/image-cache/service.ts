@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Context, Service } from "koishi";
 
 import { JsonDB } from "../../utils";
-import type { CacheEntry, ImageCacheConfig, ImageMetadata } from "./types";
+import type { CacheEntry, ImageCacheCleanupResult, ImageCacheConfig, ImageMetadata } from "./types";
 import { extFromMediaType, mediaTypeFromUrl } from "./types";
 
 declare module "koishi" {
@@ -14,6 +15,9 @@ declare module "koishi" {
     "yesimbot.image-cache": ImageCacheService;
   }
 }
+
+const SAFE_CACHE_ID_RE = /^[a-f0-9]{16}$/i;
+const SAFE_CACHE_EXT_RE = /^(jpg|png|gif|webp)$/i;
 
 export class ImageCacheService extends Service<ImageCacheConfig> {
   private index = new Map<string, ImageMetadata>();
@@ -31,13 +35,22 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     this.cacheDir = join(ctx.baseDir, "data", "yesimbot", "cache");
     this.imagesDir = join(this.cacheDir, "images");
     this.config = {
-      debugLevel: config?.debugLevel,
+      debugLevel: config?.debugLevel ?? 2,
+      autoCleanupEnabled: config?.autoCleanupEnabled ?? true,
       maxCachedImages: config?.maxCachedImages ?? 1000,
       imageTtlMs: config?.imageTtlMs ?? 7 * 24 * 3600 * 1000,
       flushIntervalMs: config?.flushIntervalMs ?? 30_000,
       cleanupIntervalMs: config?.cleanupIntervalMs ?? 3_600_000,
     };
     this.logger.level = this.config.debugLevel ?? 2;
+
+    if (typeof this.ctx.command === "function") {
+      const command = this.ctx.command("yesimbot.cache.image", "图片缓存指令集", { authority: 3 });
+      command.subcommand(".cleanup", "手动清理图片缓存").action(() => {
+        const result = this.cleanupNow("manual");
+        return formatCleanupResult(result);
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -52,11 +65,23 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     const orphanIds: string[] = [];
 
     for (const [id, meta] of Object.entries(metadata)) {
-      const filePath = join(this.imagesDir, `${meta.id}.${meta.ext}`);
+      const normalizedMeta = this.normalizeMetadataEntry(id, meta);
+      if (!normalizedMeta) {
+        orphanIds.push(id);
+        this.logger.warn(`Removed invalid image cache metadata entry: ${id}`);
+        continue;
+      }
+
+      const filePath = this.resolveImageFilePath(normalizedMeta);
+      if (!filePath) {
+        orphanIds.push(id);
+        this.logger.warn(`Removed unsafe image cache metadata entry: ${id}`);
+        continue;
+      }
       try {
         await access(filePath);
-        this.index.set(id, meta);
-        this.urlIndex.set(meta.url, meta.id);
+        this.index.set(id, normalizedMeta);
+        this.urlIndex.set(normalizedMeta.url, normalizedMeta.id);
       } catch {
         orphanIds.push(id);
       }
@@ -75,12 +100,27 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
 
     // Start periodic timers
     this.flushTimer = setInterval(() => this.flush(), this.config.flushIntervalMs);
-    this.cleanupTimer = setInterval(() => this.cleanup(), this.config.cleanupIntervalMs);
+    const startupLruRemoved = this.evictLRU();
+    if (startupLruRemoved > 0) {
+      this.flush();
+      this.logger.info(`Evicted ${startupLruRemoved} images via startup capacity check`);
+    }
+
+    if (this.config.autoCleanupEnabled) {
+      this.cleanupTimer = setInterval(
+        () => this.cleanupNow("timer"),
+        this.config.cleanupIntervalMs,
+      );
+    } else {
+      this.logger.info("Automatic image cache cleanup disabled");
+    }
   }
 
   async stop(): Promise<void> {
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    this.flushTimer = undefined;
+    this.cleanupTimer = undefined;
     this.flush();
   }
 
@@ -88,7 +128,12 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     const meta = this.index.get(id);
     if (!meta) return undefined;
 
-    const filePath = join(this.imagesDir, `${meta.id}.${meta.ext}`);
+    const filePath = this.resolveImageFilePath(meta);
+    if (!filePath) {
+      this.logger.warn(`Unsafe cache entry path for ${id}, removing metadata entry`);
+      this.removeEntry(id);
+      return undefined;
+    }
     try {
       const buffer = await readFile(filePath);
 
@@ -118,7 +163,8 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     const meta = this.index.get(id);
     if (!meta) return undefined;
 
-    const filePath = join(this.imagesDir, `${meta.id}.${meta.ext}`);
+    const filePath = this.resolveImageFilePath(meta);
+    if (!filePath) return undefined;
     try {
       const buffer = readFileSync(filePath);
       return {
@@ -157,8 +203,7 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
 
   private async doDownload(url: string): Promise<string> {
     try {
-      const ab = await this.ctx.http.get<ArrayBuffer>(url, { responseType: "arraybuffer" });
-      const buffer = Buffer.from(ab);
+      const { buffer, mediaType } = await this.readImageSource(url);
 
       // Compute content hash
       const contentHash = createHash("sha256").update(buffer).digest("hex");
@@ -171,7 +216,6 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
       }
 
       // Determine media type and extension
-      const mediaType = mediaTypeFromUrl(url);
       const ext = extFromMediaType(mediaType);
 
       // Write file to disk
@@ -214,11 +258,50 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     }
   }
 
+  private async readImageSource(url: string): Promise<{ buffer: Buffer; mediaType: string }> {
+    if (url.startsWith("data:")) {
+      return this.readDataUrl(url);
+    }
+
+    if (url.startsWith("file://")) {
+      const filePath = fileURLToPath(url);
+      const buffer = await readFile(filePath);
+      return {
+        buffer,
+        mediaType: mediaTypeFromUrl(filePath),
+      };
+    }
+
+    const ab = await this.ctx.http.get<ArrayBuffer>(url, { responseType: "arraybuffer" });
+    return {
+      buffer: Buffer.from(ab),
+      mediaType: mediaTypeFromUrl(url),
+    };
+  }
+
+  private readDataUrl(url: string): { buffer: Buffer; mediaType: string } {
+    const commaIndex = url.indexOf(",");
+    if (commaIndex < 0) {
+      throw new Error("Invalid data URL");
+    }
+
+    const header = url.slice(5, commaIndex);
+    const payload = url.slice(commaIndex + 1);
+    const parts = header.split(";");
+    const mediaType = parts[0] || "image/jpeg";
+    const isBase64 = parts.some((part) => part.toLowerCase() === "base64");
+
+    return {
+      buffer: isBase64 ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload)),
+      mediaType,
+    };
+  }
+
   urlToId(url: string): string {
     return this.urlIndex.get(url) ?? createHash("sha256").update(url).digest("hex").slice(0, 16);
   }
 
-  private removeEntry(id: string): void {
+  private removeEntry(id: string, reason?: "ttl" | "lru" | "manual"): void {
     const meta = this.index.get(id);
     if (!meta) return;
 
@@ -231,8 +314,13 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
       delete data[id];
     });
 
+    if (reason && typeof this.ctx.emit === "function") {
+      this.ctx.emit("athena:cache.evicted", "image", id, reason);
+    }
+
     // Delete file in background (ignore errors)
-    const filePath = join(this.imagesDir, `${meta.id}.${meta.ext}`);
+    const filePath = this.resolveImageFilePath(meta);
+    if (!filePath) return;
     unlink(filePath).catch(() => {});
   }
 
@@ -244,9 +332,10 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     }
   }
 
-  private cleanup(): void {
+  cleanupNow(trigger: "timer" | "manual" = "manual"): ImageCacheCleanupResult {
     const now = Date.now();
     const expiredIds: string[] = [];
+    const scanned = this.index.size;
 
     for (const [id, meta] of this.index.entries()) {
       if (now - meta.createdAt > this.config.imageTtlMs) {
@@ -256,15 +345,37 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
 
     if (expiredIds.length > 0) {
       for (const id of expiredIds) {
-        this.removeEntry(id);
+        this.removeEntry(id, "ttl");
       }
-      this.logger.info(`Cleaned up ${expiredIds.length} expired images`);
     }
+
+    const lruRemoved = this.evictLRU();
+    const totalRemoved = expiredIds.length + lruRemoved;
+    if (totalRemoved > 0) {
+      this.flush();
+    }
+
+    const result: ImageCacheCleanupResult = {
+      trigger,
+      scanned,
+      expiredRemoved: expiredIds.length,
+      lruRemoved,
+      totalRemoved,
+      remaining: this.index.size,
+    };
+
+    if (totalRemoved > 0 || trigger === "manual") {
+      this.logger.info(
+        `[${trigger}] image cache cleanup scanned=${result.scanned} expired=${result.expiredRemoved} lru=${result.lruRemoved} remaining=${result.remaining}`,
+      );
+    }
+
+    return result;
   }
 
-  private evictLRU(): void {
+  private evictLRU(): number {
     if (this.index.size <= this.config.maxCachedImages) {
-      return;
+      return 0;
     }
 
     // Sort by lastAccessedAt ascending (oldest first)
@@ -275,9 +386,57 @@ export class ImageCacheService extends Service<ImageCacheConfig> {
     // Remove oldest entries until we're at capacity
     const toRemove = this.index.size - this.config.maxCachedImages;
     for (let i = 0; i < toRemove; i++) {
-      this.removeEntry(entries[i].id);
+      const entry = entries[i];
+      if (!entry) break;
+      this.removeEntry(entry.id, "lru");
     }
 
     this.logger.info(`Evicted ${toRemove} images via LRU`);
+    return toRemove;
   }
+
+  private normalizeMetadataEntry(id: string, meta: ImageMetadata): ImageMetadata | null {
+    if (!SAFE_CACHE_ID_RE.test(id)) return null;
+    if (!meta || meta.id !== id) return null;
+    if (!SAFE_CACHE_ID_RE.test(meta.id)) return null;
+    if (typeof meta.url !== "string" || meta.url.length === 0) return null;
+    if (typeof meta.contentHash !== "string" || meta.contentHash.length === 0) return null;
+    if (typeof meta.mediaType !== "string" || meta.mediaType.length === 0) return null;
+    if (!SAFE_CACHE_EXT_RE.test(meta.ext)) return null;
+    if (
+      typeof meta.size !== "number" ||
+      typeof meta.createdAt !== "number" ||
+      typeof meta.lastAccessedAt !== "number" ||
+      typeof meta.accessCount !== "number"
+    ) {
+      return null;
+    }
+
+    return meta;
+  }
+
+  private resolveImageFilePath(meta: Pick<ImageMetadata, "id" | "ext">): string | null {
+    if (!SAFE_CACHE_ID_RE.test(meta.id)) return null;
+    if (!SAFE_CACHE_EXT_RE.test(meta.ext)) return null;
+
+    const baseDir = resolve(this.imagesDir);
+    const filePath = resolve(baseDir, `${meta.id}.${meta.ext}`);
+    if (!filePath.startsWith(`${baseDir}${sep}`)) {
+      return null;
+    }
+
+    return filePath;
+  }
+}
+
+function formatCleanupResult(result: ImageCacheCleanupResult): string {
+  return [
+    "图片缓存清理完成。",
+    `触发方式：${result.trigger === "manual" ? "手动" : "定时"}`,
+    `扫描条目：${result.scanned}`,
+    `TTL 清理：${result.expiredRemoved}`,
+    `LRU 淘汰：${result.lruRemoved}`,
+    `本次删除：${result.totalRemoved}`,
+    `剩余条目：${result.remaining}`,
+  ].join("\n");
 }

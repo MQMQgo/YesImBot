@@ -8,6 +8,7 @@ import type { ToolExecutionContext } from "../plugin/types";
 
 export enum HookType {
   Tool = "tool",
+  Message = "message",
   Agent = "agent",
 }
 
@@ -49,11 +50,13 @@ export type AgentLifecycleHookExecutionContext =
 
 export interface HookTimeoutsConfig {
   tool?: number;
+  message?: number;
   agent?: number;
 }
 
 export const DEFAULT_HOOK_TIMEOUTS: Required<HookTimeoutsConfig> = {
   tool: 3000,
+  message: 1000,
   agent: 5000,
 };
 

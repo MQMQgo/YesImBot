@@ -88,8 +88,8 @@ describe("agent loop skill loading", () => {
         get: vi.fn(),
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
-          styleFragment: null,
+          instructionBlocks: [],
+          styleBlock: null,
           toolFilter: { include: [], exclude: [] },
         }),
       },
@@ -188,9 +188,112 @@ describe("agent loop skill loading", () => {
     expect(endParams.roundContext?.skillState?.active).toContain("test-skill");
   });
 
-  it("registers loop skill catalog and tool fragment sources", async () => {
+  it("reads optional session store via ctx.get without direct property access", async () => {
+    const sessionStore = new AgentSessionStore({
+      logger: vi.fn(() => ({ info: vi.fn() })),
+    } as never);
+    const directSessionGetter = vi.fn(() => {
+      throw new Error("direct session property access should not be used");
+    });
+
+    const ctx = {
+      baseDir: "/tmp",
+      logger: vi.fn(() => ({
+        level: 2,
+        info: vi.fn(),
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      })),
+      get: vi.fn((name: string) => {
+        if (name === "yesimbot.session") return sessionStore;
+        return undefined;
+      }),
+      "yesimbot.horizon": {
+        buildView: vi.fn().mockResolvedValue({
+          self: { id: "bot", name: "Athena" },
+          environment: {
+            type: "group",
+            id: "c1",
+            name: "General",
+            platform: "discord",
+            channelId: "c1",
+          },
+          entities: [],
+          history: [],
+        }),
+        formatHorizonText: vi.fn().mockResolvedValue([]),
+        events: {
+          recordAgentResponse: vi.fn(),
+          recordAgentAction: vi.fn(),
+          recordMessage: vi.fn(),
+          markAsActive: vi.fn(),
+          archiveStale: vi.fn(),
+        },
+        compressor: undefined,
+        config: { archiveThresholdMs: 86400000 },
+      },
+      "yesimbot.plugin": {
+        getTools: vi.fn(() => []),
+        getDefinition: vi.fn(),
+        invoke: vi.fn(),
+      },
+      "yesimbot.prompt": {
+        emitPromptBlocks: vi.fn().mockResolvedValue({
+          sections: [],
+          stableBlock: "",
+          dynamicBlock: "",
+          stableSignature: "sig",
+        }),
+        registerFragmentSource: vi.fn(() => () => undefined),
+        inject: vi.fn(() => () => undefined),
+      },
+      "yesimbot.model": {
+        getProvider: vi.fn(() => ({ providerType: "openai" })),
+        call: vi.fn().mockResolvedValue({ text: JSON.stringify({ actions: [] }), usage: {} }),
+      },
+      "yesimbot.trait": { analyze: vi.fn().mockResolvedValue([]) },
+      "yesimbot.skill": {
+        get: vi.fn(),
+        resolve: vi.fn().mockReturnValue({
+          activeSkills: [],
+          instructionBlocks: [],
+          styleBlock: null,
+          toolFilter: { include: [], exclude: [] },
+        }),
+      },
+      "yesimbot.arousal": undefined,
+    } as unknown as ConstructorParameters<typeof ThinkActLoop>[0];
+
+    Object.defineProperty(ctx, "yesimbot.session", {
+      configurable: true,
+      get: directSessionGetter,
+    });
+
+    const loop = new ThinkActLoop(ctx, { model: "openai:gpt", fallbackChain: [], maxRounds: 1 });
+    await expect(
+      loop.run(createPercept(), {
+        platform: "discord",
+        channelId: "c1",
+        session: { isDirect: false, quote: undefined },
+        bot: { selfId: "bot-1", user: { name: "Athena" } },
+      } as never),
+    ).resolves.toEqual({ totalTokens: 0, totalToolCalls: 0 });
+    expect((ctx.get as ReturnType<typeof vi.fn>).mock.calls).toEqual(
+      expect.arrayContaining([["yesimbot.session"]]),
+    );
+    expect(directSessionGetter).not.toHaveBeenCalled();
+  });
+
+  it("passes loop skill catalog and tool fragments as request-local prompt fragments", async () => {
     const skill = createSkillDefinition("fragment-skill");
     const registerFragmentSource = vi.fn(() => () => undefined);
+    const emitPromptBlocks = vi.fn().mockResolvedValue({
+      sections: [],
+      stableBlock: "",
+      dynamicBlock: "",
+      stableSignature: "sig",
+    });
     const sessionStore = new AgentSessionStore({
       logger: vi.fn(() => ({ info: vi.fn() })),
     } as never);
@@ -230,12 +333,7 @@ describe("agent loop skill loading", () => {
       },
       "yesimbot.plugin": { getTools: vi.fn(() => []), getDefinition: vi.fn(), invoke: vi.fn() },
       "yesimbot.prompt": {
-        emitPromptBlocks: vi.fn().mockResolvedValue({
-          sections: [],
-          stableBlock: "",
-          dynamicBlock: "",
-          stableSignature: "sig",
-        }),
+        emitPromptBlocks,
         registerFragmentSource,
         inject: vi.fn(() => () => undefined),
       },
@@ -262,15 +360,19 @@ describe("agent loop skill loading", () => {
     const loop = new ThinkActLoop(ctx, { model: "openai:gpt", fallbackChain: [], maxRounds: 1 });
     await loop.run(createPercept(), { platform: "discord", channelId: "c1" } as never);
 
+    const promptOptions = emitPromptBlocks.mock.calls[0]?.[2] as
+      | { localFragments?: Array<{ id: string; content: string }> }
+      | undefined;
+
+    expect(registerFragmentSource).not.toHaveBeenCalled();
+    expect(promptOptions?.localFragments?.some((fragment) => fragment.id === "skill.catalog")).toBe(
+      true,
+    );
     expect(
-      registerFragmentSource.mock.calls.some((call) =>
-        String((call as unknown[])[0]).startsWith("__loop_skill_catalog_"),
-      ),
+      promptOptions?.localFragments?.some((fragment) => fragment.id === "tooling.protocol"),
     ).toBe(true);
     expect(
-      registerFragmentSource.mock.calls.some((call) =>
-        String((call as unknown[])[0]).startsWith("__loop_tool_fragments_"),
-      ),
+      promptOptions?.localFragments?.some((fragment) => fragment.id === "tooling.available"),
     ).toBe(true);
   });
 });

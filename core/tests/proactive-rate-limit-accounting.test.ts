@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { Percept } from "../src/runtime/contracts";
 import { ThinkActLoop } from "../src/services/agent/loop";
 import { FunctionType, type ToolExecutionContext } from "../src/services/plugin/types";
+import type { Percept } from "../src/services/shared/types";
 
 function createHarness(options: {
   responses: string[];
@@ -45,10 +45,11 @@ function createHarness(options: {
   const skillService = {
     resolve: vi.fn(() => ({
       activeSkills: [],
-      promptFragments: [],
-      styleFragment: null,
+      instructionBlocks: [],
+      styleBlock: null,
       toolFilter: { include: [], exclude: [] },
     })),
+    all: vi.fn(() => []),
   };
 
   const promptService = {
@@ -90,7 +91,7 @@ function createHarness(options: {
       async (name: string) =>
         invokeImpl?.(name) ?? {
           success: true,
-          status: "ok",
+          status: name === "send_message" ? "success" : "ok",
           content: name === "send_message" ? "sent" : "tool-ok",
         },
     ),
@@ -135,7 +136,7 @@ function createHarness(options: {
     bot: { selfId: "bot-1", user: { name: "Athena" } } as never,
   };
 
-  return { loop, percept, toolCtx, arousalService, agentLogger };
+  return { loop, percept, toolCtx, arousalService, agentLogger, horizonEvents };
 }
 
 describe("proactive rate-limit accounting", () => {
@@ -175,6 +176,74 @@ describe("proactive rate-limit accounting", () => {
 
     expect(harness.arousalService.recordProactiveMessage).toHaveBeenCalledTimes(1);
     expect(harness.arousalService.recordProactiveMessage).toHaveBeenCalledWith("discord:c-2");
+  });
+
+  it("records bot-visible message history for successful send_message with runtime success status", async () => {
+    const harness = createHarness({
+      responses: ['{"actions":[{"name":"send_message","params":{"content":"hello there"}}]}'],
+      isHeartbeat: false,
+    });
+
+    await harness.loop.run(harness.percept, harness.toolCtx);
+
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledTimes(1);
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: "discord",
+        channelId: "c-1",
+        data: expect.objectContaining({
+          senderId: "bot-1",
+          senderName: "Athena",
+          content: "hello there",
+        }),
+      }),
+    );
+  });
+
+  it("records bot-visible message history when model still uses legacy message param", async () => {
+    const harness = createHarness({
+      responses: ['{"actions":[{"name":"send_message","params":{"message":"legacy hello"}}]}'],
+      isHeartbeat: false,
+    });
+
+    await harness.loop.run(harness.percept, harness.toolCtx);
+
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledTimes(1);
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: "discord",
+        channelId: "c-1",
+        data: expect.objectContaining({
+          senderId: "bot-1",
+          senderName: "Athena",
+          content: "legacy hello",
+        }),
+      }),
+    );
+  });
+
+  it("records successful send_message history into the explicit target channel", async () => {
+    const harness = createHarness({
+      responses: [
+        '{"actions":[{"name":"send_message","params":{"content":"hello","target":{"platform":"discord","channelId":"c-2"}}}]}',
+      ],
+      isHeartbeat: false,
+    });
+
+    await harness.loop.run(harness.percept, harness.toolCtx);
+
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledTimes(1);
+    expect(harness.horizonEvents.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: "discord",
+        channelId: "c-2",
+        data: expect.objectContaining({
+          senderId: "bot-1",
+          senderName: "Athena",
+          content: "hello",
+        }),
+      }),
+    );
   });
 
   it("records proactive quota at most once per heartbeat run across normal and wrap-up sends", async () => {

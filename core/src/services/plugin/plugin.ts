@@ -58,7 +58,11 @@ export abstract class YesImPlugin {
     }
 
     ctx.on("ready", async () => {
-      const hookService = ctx["yesimbot.hook"] as HookService | undefined;
+      const hookService =
+        (typeof ctx.get === "function" ? ctx.get("yesimbot.hook") : undefined) ??
+        ((ctx as Context & { "yesimbot.hook"?: HookService })["yesimbot.hook"] as
+          | HookService
+          | undefined);
       if (hookService && !this.hooksRegistered) {
         hookService.registerFromDecorators(ctx, this);
         this.hooksRegistered = true;

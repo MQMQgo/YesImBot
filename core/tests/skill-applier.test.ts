@@ -22,8 +22,8 @@ describe("SkillEffectApplier", () => {
     const applier = new SkillEffectApplier();
     const effects = applier.apply(new LoadedSkillSet());
 
-    expect(effects.promptFragments).toEqual([]);
-    expect(effects.styleFragment).toBeNull();
+    expect(effects.instructionBlocks).toEqual([]);
+    expect(effects.styleBlock).toBeNull();
     expect(effects.toolVisibility).toEqual({ include: [], exclude: [] });
     expect(effects.metadata.loadedSkills).toEqual([]);
     expect(effects.metadata.loadHistory).toEqual([]);
@@ -54,8 +54,8 @@ describe("SkillEffectApplier", () => {
     const applier = new SkillEffectApplier();
     const effects = applier.apply(set);
 
-    expect(effects.promptFragments).toHaveLength(2);
-    expect(effects.promptFragments[0]).toMatchObject({
+    expect(effects.instructionBlocks).toHaveLength(2);
+    expect(effects.instructionBlocks[0]).toMatchObject({
       id: "skill.alpha.prompt",
       section: "situation",
       source: "skill",
@@ -63,7 +63,7 @@ describe("SkillEffectApplier", () => {
       stability: "dynamic",
       cacheable: false,
     });
-    expect(effects.promptFragments[1]).toMatchObject({
+    expect(effects.instructionBlocks[1]).toMatchObject({
       id: "skill.beta.prompt",
       section: "policy",
       source: "skill",
@@ -109,7 +109,7 @@ describe("SkillEffectApplier", () => {
     const applier = new SkillEffectApplier();
     const effects = applier.apply(set);
 
-    expect(effects.styleFragment).toMatchObject({
+    expect(effects.styleBlock).toMatchObject({
       id: "skill.high-specificity.style",
       content: "High style",
       section: "policy",

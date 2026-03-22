@@ -39,6 +39,7 @@ export class HookService extends Service<HookServiceConfig> {
     const hookTimeouts: HookTimeoutsConfig = hookConfig?.hookTimeouts ?? {};
     this.timeouts = {
       [HookType.Tool]: hookTimeouts.tool ?? DEFAULT_HOOK_TIMEOUTS.tool,
+      [HookType.Message]: hookTimeouts.message ?? DEFAULT_HOOK_TIMEOUTS.message,
       [HookType.Agent]: hookTimeouts.agent ?? DEFAULT_HOOK_TIMEOUTS.agent,
     };
   }

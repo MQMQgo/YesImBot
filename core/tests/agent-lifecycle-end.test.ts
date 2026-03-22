@@ -131,8 +131,8 @@ function createHarness(options?: {
   const skillService = {
     resolve: vi.fn(() => ({
       activeSkills: [{ name: "answering", effects: ["concise"] }],
-      promptFragments: [],
-      styleFragment: null,
+      instructionBlocks: [],
+      styleBlock: null,
       toolFilter: { include: [], exclude: [] },
     })),
   };

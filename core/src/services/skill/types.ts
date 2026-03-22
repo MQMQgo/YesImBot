@@ -1,3 +1,5 @@
+import type { PromptFragment } from "../prompt/types";
+
 export interface SkillResourceReference {
   path: string;
   description?: string;
@@ -22,7 +24,13 @@ export interface SkillMetadata {
   resources?: SkillResourceMap;
 }
 
-export type LoadResultStatus = "loaded" | "already_loaded" | "not_found";
+export type LoadResultStatus =
+  | "loaded"
+  | "already_loaded"
+  | "not_found"
+  | "invalid_definition"
+  | "rejected_by_policy"
+  | "loaded_but_inactive_effects";
 
 export interface LoadResult {
   status: LoadResultStatus;
@@ -32,8 +40,18 @@ export interface LoadResult {
 
 export interface LoadAttempt {
   name: string;
-  status: "loaded" | "already_loaded" | "not_found" | "unloaded";
+  status: LoadResultStatus | "unloaded";
   timestamp: number;
   caller?: string;
   reason?: string;
+}
+
+export interface AppliedSkillEffects {
+  instructionBlocks: PromptFragment[];
+  styleBlock: PromptFragment | null;
+  toolVisibility: { include: string[]; exclude: string[] };
+  metadata: {
+    loadedSkills: string[];
+    loadHistory: LoadAttempt[];
+  };
 }

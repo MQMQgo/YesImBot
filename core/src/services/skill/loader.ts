@@ -1,8 +1,14 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 
 import matter from "gray-matter";
 
+import type {
+  SkillEffects,
+  SkillFragmentMetadata,
+  SkillStyleFragmentMetadata,
+  SkillWithLegacyMetadata,
+} from "./legacy-types";
 import type { SkillDefinition, SkillResourceMap, SkillResourceReference } from "./types";
 
 function normalizeAllowedTools(input: unknown): string[] | undefined {
@@ -54,6 +60,7 @@ function normalizeResources(input: unknown): SkillResourceMap | undefined {
 
 function scanSkillResources(skillDir: string): SkillResourceMap | undefined {
   const resources: SkillResourceMap = {};
+  const rootName = basename(skillDir);
 
   const walk = (dir: string) => {
     const entries = readdirSync(dir, { withFileTypes: true });
@@ -62,6 +69,9 @@ function scanSkillResources(skillDir: string): SkillResourceMap | undefined {
       const relativePath = relative(skillDir, entryPath).replace(/\\/g, "/");
 
       if (entry.isDirectory()) {
+        if (entry.name === rootName && dir !== skillDir) {
+          continue;
+        }
         if (relativePath === "scripts" || relativePath.startsWith("scripts/")) {
           continue;
         }
@@ -81,6 +91,35 @@ function scanSkillResources(skillDir: string): SkillResourceMap | undefined {
   return Object.keys(resources).length > 0 ? resources : undefined;
 }
 
+function normalizePromptFragment(_meta: Record<string, unknown>): SkillFragmentMetadata {
+  return {
+    section: "situation",
+    stability: "dynamic",
+    priority: 400,
+    cacheable: false,
+  };
+}
+
+function normalizeStyleFragment(_meta: Record<string, unknown>): SkillStyleFragmentMetadata {
+  return {
+    section: "identity",
+    stability: "dynamic",
+    priority: 650,
+    cacheable: false,
+  };
+}
+
+function normalizeEffects(guidance: string): SkillEffects | undefined {
+  const trimmed = guidance.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return {
+    prompt: trimmed,
+  };
+}
+
 export function loadSkillsFromDir(dir: string): SkillDefinition[] {
   const entries = readdirSync(dir, { withFileTypes: true });
   const skills: SkillDefinition[] = [];
@@ -98,16 +137,22 @@ export function loadSkillsFromDir(dir: string): SkillDefinition[] {
       const raw = readFileSync(skillMdPath, "utf-8");
       const { meta, content } = parseFrontmatter(raw);
       const resources = normalizeResources(meta.resources) ?? scanSkillResources(skillDir);
+      const guidance = content.trim();
 
-      skills.push({
+      const definition: SkillWithLegacyMetadata = {
         name: typeof meta.name === "string" ? meta.name : entry.name,
         description: typeof meta.description === "string" ? meta.description : "",
-        guidance: content.trim(),
+        guidance,
         allowedTools: normalizeAllowedTools(meta.allowed_tools ?? meta["allowed-tools"]),
         resources,
-        rootDir: skillDir,
+        rootDir: skillDir.replace(/\\/g, "/"),
         source: "file",
-      });
+        promptFragment: normalizePromptFragment(meta),
+        styleFragment: normalizeStyleFragment(meta),
+        effects: normalizeEffects(guidance),
+      };
+
+      skills.push(definition);
     } catch (error) {
       console.warn("Skipping malformed skill %s: %s", entry.name, error);
     }

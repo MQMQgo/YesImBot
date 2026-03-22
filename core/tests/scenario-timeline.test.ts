@@ -140,7 +140,7 @@ describe("scenario timeline", () => {
     expect(timeline.activeSegment.mode).toBe("after-latest-summary");
   });
 
-  it("keeps summary in background and renders heartbeat as visible with detail while agent.response stays non-visible", () => {
+  it("keeps summary in background and renders heartbeat as query-only with detail while agent.response stays non-visible", () => {
     const entries = [
       createSummaryRecord({
         index: 3,
@@ -183,7 +183,7 @@ describe("scenario timeline", () => {
     const turn = timeline.turns[0];
 
     expect(timeline.latestSummary?.content).toBe("background summary");
-    expect(timeline.semantics.heartbeatRendering).toBe("visible");
+    expect(timeline.semantics.heartbeatRendering).toBe("query-only");
     expect(timeline.heartbeatEvents[0]?.detail?.channelSummary).toBe("heartbeat only");
     expect(turn?.events.some((event) => event.type === "agent.response")).toBe(true);
     expect(turn?.visibleOutputs).toHaveLength(0);

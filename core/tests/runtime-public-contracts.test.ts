@@ -44,7 +44,7 @@ describe("runtime public contracts", () => {
 
   it("source precedence stays explicit", () => {
     expect(PROMPT_FRAGMENT_SOURCE_PRECEDENCE).toEqual([
-      "role",
+      "persona",
       "memory",
       "scenario",
       "capability",
@@ -239,9 +239,9 @@ describe("runtime public contracts", () => {
       "yesimbot.skill": {
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
+          instructionBlocks: [],
           toolFilter: { include: [], exclude: [] },
-          styleFragment: null,
+          styleBlock: null,
         }),
       },
       "yesimbot.arousal": undefined,
@@ -312,12 +312,21 @@ describe("runtime public contracts", () => {
         scenario: expect.any(Object),
         capabilities: expect.any(Object),
       }),
-      expect.objectContaining({ providerType: "openai" }),
+      expect.objectContaining({
+        providerType: "openai",
+        localFragments: expect.any(Array),
+      }),
     );
 
     const scope = emitPromptBlocksSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+    const promptOptions = emitPromptBlocksSpy.mock.calls[0]?.[2] as
+      | { localFragments?: Array<{ id: string }> }
+      | undefined;
     expect(scope.roundContext).toBeTruthy();
     expect(scope.scenario).toBeTruthy();
     expect(scope.capabilities).toBeTruthy();
+    expect(promptOptions?.localFragments?.some((fragment) => fragment.id === "tooling.protocol")).toBe(
+      true,
+    );
   });
 });

@@ -103,14 +103,16 @@ describe("PersonaService fragment provider", () => {
     expect(fragments.map((fragment) => fragment.id)).toEqual([
       "persona.soul",
       "persona.agents",
+      "persona.policy",
       "persona.tools",
     ]);
     expect(fragments.map((fragment) => fragment.section)).toEqual([
       "identity",
       "policy",
+      "policy",
       "situation",
     ]);
-    expect(fragments.map((fragment) => fragment.priority)).toEqual([700, 700, 500]);
+    expect(fragments.map((fragment) => fragment.priority)).toEqual([700, 700, 700, 500]);
   });
 
   it("keeps snippet-backed persona template data available", async () => {

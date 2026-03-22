@@ -33,7 +33,6 @@ describe("skill same-run refresh", () => {
       rootDir: "/skills/search",
     };
 
-    const fragmentProviders = new Map<string, (scope: Record<string, unknown>) => unknown>();
     const roundToolAvailability: string[] = [];
 
     const pluginService = {
@@ -81,27 +80,23 @@ describe("skill same-run refresh", () => {
     };
 
     const promptService = {
-      registerFragmentSource: vi.fn(
-        (name: string, provider: (scope: Record<string, unknown>) => unknown) => {
-          fragmentProviders.set(name, provider);
-          return () => fragmentProviders.delete(name);
+      registerFragmentSource: vi.fn(() => () => undefined),
+      emitPromptBlocks: vi.fn(
+        async (
+          _template: string,
+          _scope: Record<string, unknown>,
+          options?: { localFragments?: Array<{ content?: string }> },
+        ) => {
+          const fragments = options?.localFragments ?? [];
+          roundToolAvailability.push(fragments.map((f) => f.content ?? "").join("\n\n"));
+          return {
+            sections: [],
+            stableBlock: "",
+            dynamicBlock: "",
+            stableSignature: "sig",
+          };
         },
       ),
-      emitPromptBlocks: vi.fn(async () => {
-        const toolProvider = Array.from(fragmentProviders.entries()).find(([name]) =>
-          name.startsWith("__loop_tool_fragments_"),
-        )?.[1];
-        const fragments = toolProvider
-          ? ((await toolProvider({})) as Array<{ content?: string }>)
-          : [];
-        roundToolAvailability.push(fragments.map((f) => f.content ?? "").join("\n\n"));
-        return {
-          sections: [],
-          stableBlock: "",
-          dynamicBlock: "",
-          stableSignature: "sig",
-        };
-      }),
     };
 
     const ctx = {
@@ -165,5 +160,6 @@ describe("skill same-run refresh", () => {
 
     expect(roundToolAvailability[0]).not.toContain("hidden_lookup");
     expect(roundToolAvailability[1]).toContain("hidden_lookup");
+    expect(promptService.registerFragmentSource).not.toHaveBeenCalled();
   });
 });

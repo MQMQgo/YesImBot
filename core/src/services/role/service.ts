@@ -6,12 +6,12 @@ import { Context, Service } from "koishi";
 import type { Percept, Scenario } from "../../runtime/contracts";
 import { HandlebarsRenderer } from "../prompt/renderer";
 import type { PromptService } from "../prompt/service";
-import type { PersonaServiceConfig } from "./types";
-import { PersonaServiceConfigSchema } from "./types";
+import type { RoleServiceConfig } from "./types";
+import { RoleServiceConfigSchema } from "./types";
 
 declare module "koishi" {
   interface Context {
-    "yesimbot.persona": PersonaService;
+    "yesimbot.role": RoleService;
   }
 }
 
@@ -23,9 +23,9 @@ const builtinRolesDir = resolve(
   "resources/roles",
 );
 
-export class PersonaService extends Service<PersonaServiceConfig> {
+export class RoleService extends Service<RoleServiceConfig> {
   static inject = ["yesimbot.prompt"];
-  static Config = PersonaServiceConfigSchema;
+  static Config = RoleServiceConfigSchema;
 
   private prompt: PromptService;
   private templateRenderer = new HandlebarsRenderer();
@@ -34,10 +34,10 @@ export class PersonaService extends Service<PersonaServiceConfig> {
   private disposers: Array<() => void> = [];
   private lastValid = new Map<string, string>();
 
-  constructor(ctx: Context, config: PersonaServiceConfig) {
-    super(ctx, "yesimbot.persona", false);
+  constructor(ctx: Context, config: RoleServiceConfig) {
+    super(ctx, "yesimbot.role", false);
     this.config = config;
-    this.logger = ctx.logger("persona");
+    this.logger = ctx.logger("role");
     this.logger.level = config.debugLevel ?? 2;
     this.prompt = ctx["yesimbot.prompt"];
   }
@@ -47,7 +47,7 @@ export class PersonaService extends Service<PersonaServiceConfig> {
     this.loadAndRegisterFragments();
     this.registerSnippets();
     this.startWatching();
-    this.logger.info("PersonaService started");
+    this.logger.info("RoleService started");
   }
 
   private registerSnippets(): void {
@@ -232,5 +232,6 @@ export class PersonaService extends Service<PersonaServiceConfig> {
   }
 }
 
-export { PersonaServiceConfigSchema } from "./types";
-export type { PersonaServiceConfig } from "./types";
+export { RoleService as PersonaService };
+export { PersonaServiceConfigSchema, RoleServiceConfigSchema } from "./types";
+export type { PersonaServiceConfig, RoleServiceConfig } from "./types";

@@ -36,6 +36,7 @@ vi.mock("../src/utils/jsondb", () => ({
 describe("ImageCacheService", () => {
   let ctx: Context;
   let service: ImageCacheService;
+  let cleanupAction: (() => string | Promise<string>) | undefined;
   let logger: {
     info: ReturnType<typeof vi.fn>;
     warn: ReturnType<typeof vi.fn>;
@@ -54,11 +55,24 @@ describe("ImageCacheService", () => {
       error: vi.fn(),
     };
 
+    cleanupAction = undefined;
+    const cleanupCommand = {
+      action: vi.fn((handler: () => string | Promise<string>) => {
+        cleanupAction = handler;
+        return cleanupCommand;
+      }),
+    };
+    const imageCacheCommand = {
+      subcommand: vi.fn(() => cleanupCommand),
+    };
+
     ctx = {
       baseDir: "/test",
       http: {
         get: vi.fn(),
       },
+      emit: vi.fn(),
+      command: vi.fn(() => imageCacheCommand),
       logger: vi.fn(() => logger),
     } as unknown as Context;
   });
@@ -77,8 +91,8 @@ describe("ImageCacheService", () => {
 
     it("should load metadata from JsonDB and preload index", async () => {
       const mockMetadata: Record<string, ImageMetadata> = {
-        abc123: {
-          id: "abc123",
+        abc123abc123abcd: {
+          id: "abc123abc123abcd",
           url: "https://example.com/image.jpg",
           contentHash: "full-hash",
           mediaType: "image/jpeg",
@@ -101,8 +115,8 @@ describe("ImageCacheService", () => {
     it("should remove orphan metadata entries when file is missing", async () => {
       const fs = await import("node:fs/promises");
       const mockMetadata: Record<string, ImageMetadata> = {
-        orphan123: {
-          id: "orphan123",
+        abcdabcdabcdabcd: {
+          id: "abcdabcdabcdabcd",
           url: "https://example.com/missing.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -130,6 +144,31 @@ describe("ImageCacheService", () => {
       expect(sharedMockDb.update).toHaveBeenCalled();
       expect(sharedMockDb.commit).toHaveBeenCalled();
     });
+
+    it("should reject invalid metadata paths instead of touching arbitrary files", async () => {
+      const fs = await import("node:fs/promises");
+      const mockMetadata: Record<string, ImageMetadata> = {
+        abcdefabcdefabcd: {
+          id: "abcdefabcdefabcd",
+          url: "https://example.com/evil.jpg",
+          contentHash: "hash",
+          mediaType: "image/jpeg",
+          ext: "..\\..\\metadata",
+          size: 1024,
+          createdAt: Date.now(),
+          lastAccessedAt: Date.now(),
+          accessCount: 0,
+        } as unknown as ImageMetadata,
+      };
+
+      sharedMockDb.getData.mockReturnValue(mockMetadata);
+
+      service = new ImageCacheService(ctx);
+      await service.start();
+
+      expect(sharedMockDb.update).toHaveBeenCalled();
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
   });
 
   describe("get()", () => {
@@ -146,8 +185,8 @@ describe("ImageCacheService", () => {
       (fs.readFile as unknown).mockResolvedValue(mockBuffer);
 
       const mockMetadata: Record<string, ImageMetadata> = {
-        test123: {
-          id: "test123",
+        abcd1234abcd1234: {
+          id: "abcd1234abcd1234",
           url: "https://example.com/test.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -166,7 +205,7 @@ describe("ImageCacheService", () => {
       service = new ImageCacheService(ctx);
       await service.start();
 
-      const result = await service.get("test123");
+      const result = await service.get("abcd1234abcd1234");
 
       expect(result).toEqual({
         base64: mockBuffer.toString("base64"),
@@ -181,8 +220,8 @@ describe("ImageCacheService", () => {
       (fs.readFile as unknown).mockResolvedValue(Buffer.from("data"));
 
       const mockMetadata: Record<string, ImageMetadata> = {
-        test123: {
-          id: "test123",
+        abcd1234abcd1234: {
+          id: "abcd1234abcd1234",
           url: "https://example.com/test.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -201,10 +240,10 @@ describe("ImageCacheService", () => {
       service = new ImageCacheService(ctx);
       await service.start();
 
-      await service.get("test123");
+      await service.get("abcd1234abcd1234");
 
       expect(sharedMockDb.set).toHaveBeenCalledWith(
-        "test123",
+        "abcd1234abcd1234",
         expect.objectContaining({
           accessCount: 6,
         }),
@@ -216,8 +255,8 @@ describe("ImageCacheService", () => {
       (fs.readFile as unknown).mockRejectedValue(new Error("Read failed"));
 
       const mockMetadata: Record<string, ImageMetadata> = {
-        bad123: {
-          id: "bad123",
+        deadbeefdeadbeef: {
+          id: "deadbeefdeadbeef",
           url: "https://example.com/bad.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -234,7 +273,7 @@ describe("ImageCacheService", () => {
       service = new ImageCacheService(ctx);
       await service.start();
 
-      const result = await service.get("bad123");
+      const result = await service.get("deadbeefdeadbeef");
 
       expect(result).toBeUndefined();
       expect(sharedMockDb.update).toHaveBeenCalled();
@@ -245,8 +284,8 @@ describe("ImageCacheService", () => {
     it("should return existing contentId if URL already cached", async () => {
       const fs = await import("node:fs/promises");
       const mockMetadata: Record<string, ImageMetadata> = {
-        existing123: {
-          id: "existing123",
+        eeeeeeeeeeeeeeee: {
+          id: "eeeeeeeeeeeeeeee",
           url: "https://example.com/cached.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -267,7 +306,7 @@ describe("ImageCacheService", () => {
 
       const result = await service.download("https://example.com/cached.jpg");
 
-      expect(result).toBe("existing123");
+      expect(result).toBe("eeeeeeeeeeeeeeee");
       expect(ctx.http.get).not.toHaveBeenCalled();
     });
 
@@ -411,8 +450,8 @@ describe("ImageCacheService", () => {
     it("should remove TTL-expired entries", async () => {
       const now = Date.now();
       const mockMetadata: Record<string, ImageMetadata> = {
-        old123: {
-          id: "old123",
+        "1111222233334444": {
+          id: "1111222233334444",
           url: "https://example.com/old.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -422,8 +461,8 @@ describe("ImageCacheService", () => {
           lastAccessedAt: now - 8 * 24 * 3600 * 1000,
           accessCount: 0,
         },
-        new123: {
-          id: "new123",
+        "5555666677778888": {
+          id: "5555666677778888",
           url: "https://example.com/new.jpg",
           contentHash: "hash2",
           mediaType: "image/jpeg",
@@ -446,7 +485,7 @@ describe("ImageCacheService", () => {
       await service.start();
 
       // Manually trigger cleanup
-      (service as unknown).cleanup();
+      service.cleanupNow("manual");
 
       // Verify old entry was removed
       expect(sharedMockDb.update).toHaveBeenCalled();
@@ -483,17 +522,70 @@ describe("ImageCacheService", () => {
           flushIntervalMs: 60_000,
           cleanupIntervalMs: 1_000,
         });
-        const cleanupSpy = vi.spyOn(service as unknown as { cleanup: () => void }, "cleanup");
+        const cleanupSpy = vi.spyOn(service, "cleanupNow");
         await service.start();
 
         await vi.advanceTimersByTimeAsync(1_000);
 
-        expect(cleanupSpy).toHaveBeenCalledTimes(1);
+        expect(cleanupSpy).toHaveBeenCalledWith("timer");
         expect(sharedMockDb.update).toHaveBeenCalled();
       } finally {
         await service.stop();
         vi.useRealTimers();
       }
+    });
+
+    it("should not schedule periodic cleanup when auto cleanup is disabled", async () => {
+      vi.useFakeTimers();
+      try {
+        service = new ImageCacheService(ctx, {
+          autoCleanupEnabled: false,
+          cleanupIntervalMs: 1_000,
+        });
+        const cleanupSpy = vi.spyOn(service, "cleanupNow");
+        await service.start();
+
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        expect(cleanupSpy).not.toHaveBeenCalled();
+      } finally {
+        await service.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it("should expose a manual cleanup command with cleanup summary", async () => {
+      const now = Date.now();
+      const mockMetadata: Record<string, ImageMetadata> = {
+        "1111222233334444": {
+          id: "1111222233334444",
+          url: "https://example.com/old.jpg",
+          contentHash: "hash-old",
+          mediaType: "image/jpeg",
+          ext: "jpg",
+          size: 1024,
+          createdAt: now - 8 * 24 * 3600 * 1000,
+          lastAccessedAt: now - 8 * 24 * 3600 * 1000,
+          accessCount: 0,
+        },
+      };
+
+      sharedMockDb.getData.mockReturnValue(mockMetadata);
+      service = new ImageCacheService(ctx);
+      await service.start();
+
+      expect(cleanupAction).toBeTypeOf("function");
+      const result = await cleanupAction?.();
+
+      expect(result).toContain("TTL");
+      expect(result).toContain("1");
+      expect(sharedMockDb.update).toHaveBeenCalled();
+      expect(ctx.emit).toHaveBeenCalledWith(
+        "athena:cache.evicted",
+        "image",
+        "1111222233334444",
+        "ttl",
+      );
     });
   });
 
@@ -513,8 +605,8 @@ describe("ImageCacheService", () => {
     it("should return existing mapping from urlIndex", async () => {
       const fs = await import("node:fs/promises");
       const mockMetadata: Record<string, ImageMetadata> = {
-        content123: {
-          id: "content123",
+        cccccccccccccccc: {
+          id: "cccccccccccccccc",
           url: "https://example.com/test.jpg",
           contentHash: "hash",
           mediaType: "image/jpeg",
@@ -535,7 +627,7 @@ describe("ImageCacheService", () => {
 
       const result = service.urlToId("https://example.com/test.jpg");
 
-      expect(result).toBe("content123");
+      expect(result).toBe("cccccccccccccccc");
     });
 
     it("should compute SHA-256 hash for unknown URL", async () => {

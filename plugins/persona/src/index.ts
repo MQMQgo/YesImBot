@@ -1,11 +1,30 @@
 import { Context, Schema } from "koishi";
-import type {} from "koishi-plugin-yesimbot/services/prompt";
 
-import enUS from "./locales/en-US.json";
-import zhCN from "./locales/zh-CN.json";
+type PromptFragment = {
+  id: string;
+  section: "identity" | "policy" | "memory" | "situation";
+  source: "persona" | "memory" | "scenario" | "capability" | "skill" | "hook" | "tooling";
+  stability: "stable" | "dynamic";
+  priority: number;
+  cacheable?: boolean;
+  content: string;
+};
+
+interface PromptServiceLike {
+  registerFragmentSource?: (
+    name: string,
+    provider: () => Promise<PromptFragment[]> | PromptFragment[],
+  ) => () => void;
+}
+
+declare module "koishi" {
+  interface Context {
+    "yesimbot.prompt": PromptServiceLike;
+  }
+}
 
 export const name = "yesimbot-persona";
-export const inject = ["yesimbot.prompt"];
+export const inject = ["yesimbot.prompt"] as const;
 
 export interface Config {
   name: string;
@@ -15,31 +34,65 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  name: Schema.string().default(""),
-  personality: Schema.string().default(""),
-  tone: Schema.string().default(""),
-  extra: Schema.string().role("textarea").default(""),
-}).i18n({ "zh-CN": zhCN._config, "en-US": enUS._config });
+  name: Schema.string().default("").description("Override display name hint for the persona."),
+  personality: Schema.string()
+    .default("")
+    .description("Core personality traits the model should embody."),
+  tone: Schema.string().default("").description("Speaking tone and style guidance."),
+  extra: Schema.string()
+    .role("textarea", { rows: [4, 8] })
+    .default("")
+    .description("Additional free-form persona notes or examples."),
+});
 
-const SEMANTIC_PREFIX = "以下是补充人格特质：";
+const SEMANTIC_PREFIX =
+  "Additional persona details. Treat these as a supplement to the main identity instructions.";
 
-export function buildPersonaText(config: Config): string {
-  const lines: string[] = [];
-  if (config.name) lines.push(`name：${config.name}`);
-  if (config.personality) lines.push(`personality：${config.personality}`);
-  if (config.tone) lines.push(`tone：${config.tone}`);
-  if (config.extra) lines.push(`extra：${config.extra}`);
-  if (lines.length === 0) return "";
-  return `${SEMANTIC_PREFIX}\n${lines.join("\n")}`;
+function normalizeField(value: string): string {
+  return value.trim();
 }
 
-export function apply(ctx: Context, config: Config) {
+function buildPersonaFragment(content: string): PromptFragment {
+  return {
+    id: "persona.supplement",
+    section: "identity",
+    source: "hook",
+    stability: "stable",
+    priority: 695,
+    cacheable: true,
+    content: ["<persona_supplement>", content, "</persona_supplement>"].join("\n"),
+  };
+}
+
+export function buildPersonaText(config: Config): string {
+  const resolvedName = normalizeField(config.name);
+  const resolvedPersonality = normalizeField(config.personality);
+  const resolvedTone = normalizeField(config.tone);
+  const resolvedExtra = normalizeField(config.extra);
+
+  const lines: string[] = [];
+  if (resolvedName) lines.push(`name: ${resolvedName}`);
+  if (resolvedPersonality) lines.push(`personality: ${resolvedPersonality}`);
+  if (resolvedTone) lines.push(`tone: ${resolvedTone}`);
+  if (resolvedExtra) lines.push(`extra:\n${resolvedExtra}`);
+
+  if (lines.length === 0) return "";
+  return [SEMANTIC_PREFIX, ...lines].join("\n");
+}
+
+export function apply(ctx: Context, config: Config): void {
   const text = buildPersonaText(config);
   if (!text) return;
 
-  ctx["yesimbot.prompt"].inject(ctx, "soul", {
-    name: "__persona_supplement",
-    after: "__role_soul",
-    renderFn: () => text,
-  });
+  const prompt = ctx["yesimbot.prompt"] as PromptServiceLike;
+  if (typeof prompt.registerFragmentSource === "function") {
+    const dispose = prompt.registerFragmentSource(
+      "persona-plugin",
+      async (): Promise<PromptFragment[]> => [buildPersonaFragment(text)],
+    );
+    ctx.on("dispose", () => dispose());
+    return;
+  }
+
+  throw new TypeError("yesimbot.prompt does not expose registerFragmentSource().");
 }

@@ -47,7 +47,7 @@
     "fmt": "oxfmt",
     "lint": "oxlint",
     "pub": "yarn npm publish --access public",
-    "test": "vitest run",
+    "test": "node ../node_modules/vitest/vitest.mjs run",
     "typecheck": "tsc --noEmit && echo 'Type check passed!'"
   },
   "dependencies": {

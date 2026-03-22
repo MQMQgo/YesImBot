@@ -40,6 +40,7 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
 
   async handle(entry: MessageRecord, options: BuildContextOptions): Promise<LoopMessage[]> {
     const {
+      selfId,
       shortIdAssigner,
       getShortId,
       channelKey,
@@ -50,6 +51,12 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
       incrementLifecycle,
     } = options;
     const { data, timestamp } = entry;
+
+    // Messages sent by the bot are part of the visible conversation history and
+    // should be replayed as assistant turns rather than re-labeled as user XML.
+    if (selfId && data.senderId === selfId) {
+      return [{ role: "assistant", content: data.content }];
+    }
 
     // Assign short ID
     const shortId = shortIdAssigner && channelKey ? shortIdAssigner(channelKey, data.messageId) : 0;
@@ -97,7 +104,8 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
 
           parts.push({
             type: "image",
-            image: `data:${cache.mediaType};base64,${cache.base64}`,
+            image: cache.base64,
+            mediaType: cache.mediaType,
           });
         }
 
@@ -151,7 +159,7 @@ class AgentActionHandler extends TimelineHandler<AgentActionRecord> {
 
     // Format actions
     for (const action of data.actions) {
-      const paramsStr = JSON.stringify(action.params ?? {});
+      const paramsStr = action.params ? JSON.stringify(action.params) : "";
       lines.push(`${action.name}(${paramsStr})`);
     }
 

@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 import { Element, h, Random, Schema, sleep } from "koishi";
 
+import type { FormatterService } from "../../formatter/service";
 import type { MessageEventData } from "../../horizon/types";
 import { TimelineStage } from "../../horizon/types";
+import type { HookService } from "../../hook/service";
+import { HookType } from "../../hook/types";
 import type { SkillRegistry } from "../../skill/service";
 import type { AgentSessionStore } from "../../skill/session-store";
 import type { SkillDefinition } from "../../skill/types";
@@ -35,7 +38,14 @@ function filterInteractive(elements: Element[]): Element[] {
 
 @Metadata({ name: "core", description: "Core built-in tools", builtin: true })
 export class CorePlugin extends YesImPlugin {
-  static inject = ["yesimbot.plugin", "yesimbot.horizon", "yesimbot.skill", "yesimbot.session"];
+  static inject = [
+    "yesimbot.plugin",
+    "yesimbot.horizon",
+    "yesimbot.skill",
+    "yesimbot.session",
+    "yesimbot.hook",
+    "yesimbot.formatter",
+  ];
 
   private resolveNativeMsgId(ctx: ToolExecutionContext, shortIdStr: string): string | null {
     const shortId = Number(shortIdStr);
@@ -186,7 +196,12 @@ export class CorePlugin extends YesImPlugin {
 
     const resolvedSkillRoot = resolve(skill.rootDir);
     const resolvedPath = resolve(skill.rootDir, reference.path);
-    if (resolvedPath !== resolvedSkillRoot && !resolvedPath.startsWith(`${resolvedSkillRoot}/`)) {
+    const relativePath = relative(resolvedSkillRoot, resolvedPath);
+    if (
+      relativePath.startsWith("..") ||
+      relativePath === "" ||
+      relativePath.split(sep).includes("..")
+    ) {
       return Failed("Invalid resource path");
     }
 
@@ -201,6 +216,84 @@ export class CorePlugin extends YesImPlugin {
       });
     } catch (error) {
       return Failed(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  @Tool({
+    name: "execute",
+    description:
+      "Execute a Koishi command from another plugin in the current session and return its output. " +
+      "The command runs with the current channel, user authority, locale, and plugin context. " +
+      "Use this when an existing Koishi command already provides the capability you need.",
+    parameters: withInnerThoughts({
+      command: Schema.string()
+        .required()
+        .description(
+          "Koishi command text to execute in the current session. " +
+            "Use plain command text such as 'help weather' or 'status --verbose'. " +
+            "Do not use this for normal chatting; use send_message for that.",
+        ),
+      expose_to_user: Schema.boolean()
+        .default(false)
+        .description(
+          "Whether to also send the captured command output directly to the current conversation. " +
+            "Keep false when you only need the result privately for reasoning. " +
+            "Set true only when the command result itself should be shown to the user.",
+        ),
+    }),
+    requiredCapabilities: ["platform.session"],
+    onCapabilityMissing: "remove",
+  })
+  async executeCommand(
+    params: Record<string, unknown>,
+    ctx: ToolExecutionContext,
+  ): Promise<ToolResult> {
+    try {
+      const session = ctx.session;
+      if (!session) return Failed("No active session");
+
+      const command = String(params["command"] ?? "").trim();
+      if (!command) return Failed("command is required");
+      const exposeToUser = params["expose_to_user"] === true;
+
+      const result = await session.execute(command, true);
+      const formatter = this.ctx["yesimbot.formatter"] as FormatterService | undefined;
+      const content = Array.isArray(result)
+        ? formatter
+          ? (await formatter.format(result as Element[], session)).trim()
+          : result
+              .map((part) => (typeof part === "string" ? part : part.toString()))
+              .join("")
+              .trim()
+        : result == null
+          ? ""
+          : String(result).trim();
+
+      if (exposeToUser && content) {
+        try {
+          const exposed = Array.isArray(result)
+            ? filterInteractive(result as Element[])
+            : filterInteractive(h.parse(content));
+          await session.send(exposed);
+        } catch (emitError) {
+          return Success(
+            `${content}\n\n[Warning: failed to expose command output to user: ${
+              emitError instanceof Error ? emitError.message : String(emitError)
+            }]`,
+          );
+        }
+      }
+
+      if (!content) {
+        return Success(
+          "Command finished with no visible output. " +
+            "It may have succeeded silently, been filtered by context/authority, or produced no response.",
+        );
+      }
+
+      return Success(content);
+    } catch (e) {
+      return Failed(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -241,10 +334,23 @@ export class CorePlugin extends YesImPlugin {
     params: Record<string, unknown>,
     ctx: ToolExecutionContext,
   ): Promise<ToolResult> {
-    const content = String(params["content"] ?? "");
+    const hookService = this.ctx["yesimbot.hook"] as HookService | undefined;
+    let content = readSendMessageContent(params);
     try {
       const target = params["target"] as { platform: string; channelId: string } | undefined;
       const replyToStr = params["replyTo"] as string | undefined;
+
+      if (hookService) {
+        const beforeResult = await hookService.executeBefore(
+          HookType.Message,
+          { content, session: ctx.session },
+          ctx.percept?.traceId,
+        );
+        if (beforeResult.skipped) {
+          return beforeResult.result as ToolResult;
+        }
+        content = (beforeResult.params as { content: string }).content;
+      }
 
       const parts = content
         .split("<sep/>")
@@ -366,7 +472,29 @@ export class CorePlugin extends YesImPlugin {
         });
       }
     } catch (e) {
+      if (hookService) {
+        await hookService.executeError(
+          HookType.Message,
+          { content, session: ctx.session },
+          e instanceof Error ? e : new Error(String(e)),
+          ctx.percept?.traceId,
+        );
+      }
       return Failed(e instanceof Error ? e.message : String(e));
     }
   }
+}
+
+function readSendMessageContent(params: Record<string, unknown>): string {
+  const content = params["content"];
+  if (typeof content === "string") {
+    return content;
+  }
+
+  const legacyMessage = params["message"];
+  if (typeof legacyMessage === "string") {
+    return legacyMessage;
+  }
+
+  return "";
 }

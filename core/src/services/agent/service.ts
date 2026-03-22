@@ -1,12 +1,12 @@
 import { Context, Random, Service } from "koishi";
 
-import { Percept } from "../../runtime/contracts";
-import { buildMinimalContext } from "../../shared/context-factory";
 import type { HorizonService } from "../horizon/service";
 import type { HorizonMessageEvent } from "../horizon/types";
 import type { ModelService } from "../model/service";
 import { ToolExecutionContext } from "../plugin/types";
-import type { PersonaService } from "../role/service";
+import type { RoleService } from "../role/service";
+import { Percept } from "../runtime/contracts";
+import { buildMinimalContext } from "../shared/context-factory";
 import { JsonParser } from "./json-parser";
 import { ThinkActLoop } from "./loop";
 import { TokenBucket, WillingnessConfig, WillingnessEngine } from "./willingness";
@@ -79,7 +79,7 @@ export interface AgentCoreConfig {
   willingness?: WillingnessConfig;
   aggregationWindow?: number;
   errorReportChannel?: string;
-  debugLevel?: 0 | 1 | 2 | 3;
+  debugLevel?: number;
   imageMode?: "native" | "off";
   maxImagesInContext?: number;
   imageLifecycleCount?: number;
@@ -99,15 +99,19 @@ interface DMWindow {
   traceId: string;
 }
 
+const INBOUND_MESSAGE_DEDUP_TTL_MS = 10 * 60 * 1000;
+const INBOUND_MESSAGE_DEDUP_MAX_ENTRIES = 5000;
+
 export class AgentCore extends Service<AgentCoreConfig> {
   static inject = [
     "yesimbot.horizon",
     "yesimbot.plugin",
     "yesimbot.prompt",
     "yesimbot.model",
+    "yesimbot.trait",
     "yesimbot.skill",
     "yesimbot.session",
-    "yesimbot.persona",
+    "yesimbot.role",
     "yesimbot.hook",
     "yesimbot.arousal",
   ];
@@ -118,6 +122,7 @@ export class AgentCore extends Service<AgentCoreConfig> {
   private deferredTimers = new Map<string, () => void>();
   private deferredGen = new Map<string, number>();
   private dmWindows = new Map<string, DMWindow>();
+  private seenInboundMessages = new Map<string, number>();
   private loop!: ThinkActLoop;
   private willingness!: WillingnessEngine;
   private rateLimiter!: { dm: TokenBucket; group: TokenBucket };
@@ -157,6 +162,9 @@ export class AgentCore extends Service<AgentCoreConfig> {
     try {
       const traceId = `msg-${Random.id(8, 16)}`;
       const channelKey = `${event.platform}:${event.channelId}`;
+      if (this.shouldSkipDuplicateInboundMessage(event, traceId, channelKey)) {
+        return;
+      }
 
       // Rate limit check — before any processing
       const userId = event.payload.senderId;
@@ -218,6 +226,48 @@ export class AgentCore extends Service<AgentCoreConfig> {
     }
   }
 
+  private shouldSkipDuplicateInboundMessage(
+    event: HorizonMessageEvent,
+    traceId: string,
+    channelKey: string,
+  ): boolean {
+    const messageId = event.payload.messageId?.trim();
+    if (!messageId) return false;
+
+    const now = Date.now();
+    this.pruneSeenInboundMessages(now);
+
+    const dedupKey = `${channelKey}:${messageId}`;
+    const seenAt = this.seenInboundMessages.get(dedupKey);
+    if (typeof seenAt === "number" && now - seenAt < INBOUND_MESSAGE_DEDUP_TTL_MS) {
+      this.logger.debug(`[${traceId}] duplicate inbound message ignored ${dedupKey}`);
+      return true;
+    }
+
+    if (typeof seenAt === "number") {
+      this.seenInboundMessages.delete(dedupKey);
+    }
+    this.seenInboundMessages.set(dedupKey, now);
+    this.trimSeenInboundMessages();
+    return false;
+  }
+
+  private pruneSeenInboundMessages(now: number): void {
+    for (const [key, seenAt] of this.seenInboundMessages) {
+      if (now - seenAt >= INBOUND_MESSAGE_DEDUP_TTL_MS) {
+        this.seenInboundMessages.delete(key);
+      }
+    }
+  }
+
+  private trimSeenInboundMessages(): void {
+    while (this.seenInboundMessages.size > INBOUND_MESSAGE_DEDUP_MAX_ENTRIES) {
+      const oldestKey = this.seenInboundMessages.keys().next().value;
+      if (!oldestKey) break;
+      this.seenInboundMessages.delete(oldestKey);
+    }
+  }
+
   private handleHeartbeat(data: {
     platform: string;
     channelId: string;
@@ -225,12 +275,9 @@ export class AgentCore extends Service<AgentCoreConfig> {
   }): void {
     try {
       const channelKey = `${data.platform}:${data.channelId}`;
-      const source = data.triggeredBy === "global" ? "global" : "manual";
-      const traceId = `hb-${source}-${Random.id(8, 16)}`;
+      const traceId = `hb-${Random.id(8, 16)}`;
 
-      this.logger.info(
-        `Heartbeat: channel=${channelKey} source=${data.triggeredBy} trace_id=${traceId}`,
-      );
+      this.logger.info(`[heartbeat] channel=${channelKey} triggered by=${data.triggeredBy}`);
 
       const built: LoopPayload = {
         percept: {
@@ -253,9 +300,7 @@ export class AgentCore extends Service<AgentCoreConfig> {
 
       this.enqueue(channelKey, built);
     } catch (err: unknown) {
-      this.logger.error(
-        `Heartbeat handling failed: error=${err instanceof Error ? err.message : String(err)} channel=${data.platform}:${data.channelId} source=${data.triggeredBy}`,
-      );
+      this.logger.error(`handleHeartbeat error: ${err}`);
     }
   }
 
@@ -495,8 +540,8 @@ export class AgentCore extends Service<AgentCoreConfig> {
         },
       );
       const contextText = await horizon.formatHorizonText(view);
-      const personaService = this.ctx["yesimbot.persona"] as PersonaService;
-      const personaSummary = personaService.getSoulSummary(300);
+      const roleService = this.ctx["yesimbot.role"] as RoleService;
+      const personaSummary = roleService.getSoulSummary(300);
       const judgmentModel = this.config.willingness?.deferred?.model ?? "";
       const fallbackChain = this.config.willingness?.deferred?.fallbackChain ?? [];
       const result = await modelService.call(

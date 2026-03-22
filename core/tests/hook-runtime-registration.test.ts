@@ -4,6 +4,7 @@ import { apply } from "../src/index";
 import { AgentCore } from "../src/services/agent";
 import { HookService } from "../src/services/hook/service";
 import { PluginService } from "../src/services/plugin";
+import { AgentSessionStore } from "../src/services/skill";
 
 function createConfig(): Record<string, unknown> {
   return {
@@ -86,7 +87,7 @@ function createConfig(): Record<string, unknown> {
 }
 
 describe("Hook runtime startup registration", () => {
-  it("registers HookService in apply() before PluginService and AgentCore", () => {
+  it("registers HookService and AgentSessionStore before PluginService and AgentCore", () => {
     const pluginCalls: Array<{ plugin: unknown; options?: unknown }> = [];
     const ctx = {
       logger: vi.fn(() => ({ info: vi.fn() })),
@@ -103,15 +104,19 @@ describe("Hook runtime startup registration", () => {
     apply(ctx as never, createConfig() as never);
 
     const hookIndex = pluginCalls.findIndex((entry) => entry.plugin === HookService);
+    const sessionIndex = pluginCalls.findIndex((entry) => entry.plugin === AgentSessionStore);
     const pluginIndex = pluginCalls.findIndex((entry) => entry.plugin === PluginService);
     const agentIndex = pluginCalls.findIndex((entry) => entry.plugin === AgentCore);
 
     expect(hookIndex).toBeGreaterThanOrEqual(0);
+    expect(sessionIndex).toBeGreaterThanOrEqual(0);
     expect(pluginIndex).toBeGreaterThanOrEqual(0);
     expect(agentIndex).toBeGreaterThanOrEqual(0);
     expect(hookIndex).toBeLessThan(pluginIndex);
     expect(hookIndex).toBeLessThan(agentIndex);
+    expect(sessionIndex).toBeLessThan(agentIndex);
     expect(pluginCalls[hookIndex]?.plugin).toBe(HookService);
+    expect(pluginCalls[sessionIndex]?.plugin).toBe(AgentSessionStore);
   });
 
   it("keeps the yesimbot.hook service key contract in HookService constructor", () => {

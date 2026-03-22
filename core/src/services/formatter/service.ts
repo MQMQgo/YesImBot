@@ -21,7 +21,7 @@ export class FormatterService extends Service<FormatterServiceConfig> {
   constructor(ctx: Context, config: FormatterServiceConfig = {}) {
     super(ctx, "yesimbot.formatter", true);
     this.config = config;
-    this.logger = ctx.logger("formatter");
+    this.logger = ctx.logger("yesimbot.formatter");
     this.logger.level = this.config.debugLevel ?? 2;
     registerBuiltinHandlers(this.register.bind(this), ctx);
   }
@@ -30,16 +30,20 @@ export class FormatterService extends Service<FormatterServiceConfig> {
     this.handlers.set(type, handler);
   }
 
-  format(elements: Element[], session?: Session): string {
-    return elements.map((el) => this.formatElement(el, session)).join("");
+  async format(elements: Element[], session?: Session): Promise<string> {
+    const parts: string[] = [];
+    for (const el of elements) {
+      parts.push(await this.formatElement(el, session));
+    }
+    return parts.join("");
   }
 
-  private formatElement(el: Element, _session?: Session): string {
+  private async formatElement(el: Element, _session?: Session): Promise<string> {
     if (el.type === "text") {
       return el.toString();
     }
     const handler = this.handlers.get(el.type);
-    if (handler) return handler(el.attrs, el.children);
+    if (handler) return await handler(el.attrs, el.children);
     return `<unsupported type="${el.type}"/>`;
   }
 }

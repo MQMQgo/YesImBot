@@ -39,7 +39,10 @@ export interface CacheEntry {
  * Service configuration.
  */
 export interface ImageCacheConfig {
+  /** Logger verbosity for this service */
   debugLevel?: number;
+  /** Whether periodic cleanup should run automatically */
+  autoCleanupEnabled: boolean;
   /** Maximum number of cached images before LRU eviction */
   maxCachedImages: number;
   /** Time-to-live in milliseconds (default 7 days) */
@@ -48,6 +51,21 @@ export interface ImageCacheConfig {
   flushIntervalMs: number;
   /** Cleanup timer interval in milliseconds (default 1 hour) */
   cleanupIntervalMs: number;
+}
+
+export interface ImageCacheCleanupResult {
+  /** Trigger source for this cleanup run */
+  trigger: "timer" | "manual";
+  /** Number of cache entries scanned */
+  scanned: number;
+  /** Number of TTL-expired entries removed */
+  expiredRemoved: number;
+  /** Number of entries evicted by LRU capacity enforcement */
+  lruRemoved: number;
+  /** Total entries removed in this run */
+  totalRemoved: number;
+  /** Remaining entries after cleanup */
+  remaining: number;
 }
 
 /**

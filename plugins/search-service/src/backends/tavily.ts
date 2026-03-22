@@ -45,7 +45,7 @@ export class TavilyBackend implements SearchBackend {
   async search(query: string, options: SearchOptions): Promise<SearchResult[]> {
     if (!this.config.apiKey) return [];
 
-    const endpoint = "https://api.tavily.com/search";
+    const endpoint = this.config.endpoint?.trim() || "https://api.tavily.com/search";
     const maxResults = options.limit ?? this.config.defaultLimit ?? 5;
 
     try {

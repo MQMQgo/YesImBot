@@ -50,8 +50,8 @@ function createCompressionHarness(options: CompressionHarnessOptions = {}) {
   const skillService = {
     resolve: vi.fn(() => ({
       activeSkills: [],
-      promptFragments: [],
-      styleFragment: null,
+      instructionBlocks: [],
+      styleBlock: null,
       toolFilter: { include: [], exclude: [] },
     })),
   };

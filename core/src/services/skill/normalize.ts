@@ -1,7 +1,7 @@
 import type { FragmentStability, PromptSectionName } from "../prompt/types";
-import type { SkillDefinition } from "./types";
+import type { SkillWithLegacyMetadata } from "./legacy-types";
 
-export function normalizePromptMetadata(skill: SkillDefinition): {
+export function normalizePromptMetadata(skill: SkillWithLegacyMetadata): {
   section: PromptSectionName;
   stability: FragmentStability;
   priority: number;
@@ -16,7 +16,7 @@ export function normalizePromptMetadata(skill: SkillDefinition): {
   };
 }
 
-export function normalizeStyleMetadata(skill: SkillDefinition): {
+export function normalizeStyleMetadata(skill: SkillWithLegacyMetadata): {
   section: Extract<PromptSectionName, "identity" | "policy">;
   stability: FragmentStability;
   priority: number;

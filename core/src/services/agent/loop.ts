@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import type { ModelMessage, SystemModelMessage } from "ai";
-import { Context } from "koishi";
+import { Context, Random } from "koishi";
 
 import {
   bindCommittedRoundContext,
@@ -22,7 +22,7 @@ import type { ActiveSkill } from "../../shared/types";
 import type { HookService } from "../hook/service";
 import { HookType } from "../hook/types";
 import type { HorizonService } from "../horizon/service";
-import type { HorizonView } from "../horizon/types";
+import { TimelineStage, type HorizonView } from "../horizon/types";
 import type { CallParams, ModelService } from "../model/service";
 import type { PluginService } from "../plugin/service";
 import { FunctionType, ToolExecutionContext, ToolResult } from "../plugin/types";
@@ -81,6 +81,13 @@ interface SettlementCounters {
   succeeded: number;
   failed: number;
   names: Set<string>;
+}
+
+function getOptionalService<T>(ctx: Context, name: string): T | undefined {
+  return (
+    (typeof ctx.get === "function" ? ctx.get(name) : undefined) ??
+    ((ctx as Context & Record<string, T | undefined>)[name] as T | undefined)
+  );
 }
 
 export class ThinkActLoop {
@@ -162,8 +169,8 @@ export class ThinkActLoop {
       }
     }
 
-    const skillCatalog = this.ctx["yesimbot.skill"] as SkillRegistry | undefined;
-    const sessionStore = this.ctx["yesimbot.session"] as AgentSessionStore | undefined;
+    const skillCatalog = getOptionalService<SkillRegistry>(this.ctx, "yesimbot.skill");
+    const sessionStore = getOptionalService<AgentSessionStore>(this.ctx, "yesimbot.session");
     let signals = runtimeToolCtx.traits ?? [];
 
     const hookService = this.ctx["yesimbot.hook"] as HookService | undefined;
@@ -270,7 +277,10 @@ export class ThinkActLoop {
       const sessionState = sessionStore?.getState(percept.platform, percept.channelId);
       currentLoadedSkills = sessionState?.loadedSkills.length
         ? sessionState.loadedSkills.flatMap((skillName) => {
-            const definition = skillCatalog?.get(skillName);
+            const definition =
+              skillCatalog && typeof skillCatalog.get === "function"
+                ? skillCatalog.get(skillName)
+                : undefined;
             return definition ? [definition] : [];
           })
         : [];
@@ -295,21 +305,6 @@ export class ThinkActLoop {
 
     refreshRuntimeSkillState();
 
-    const disposers: Array<() => void> = [];
-
-    registerPromptFragmentSource(
-      promptService,
-      disposers,
-      `__loop_skill_catalog_${percept.id}`,
-      () => buildSkillCatalogPromptFragments(skillCatalog?.all() ?? [], roundContext.skillState),
-    );
-    registerPromptFragmentSource(
-      promptService,
-      disposers,
-      `__loop_tool_fragments_${percept.id}`,
-      () => buildToolPromptFragments(pluginService, runtimeToolCtx, currentAllowedTools),
-    );
-
     try {
       const providerType = modelService.getProvider(
         (this.config.model ?? "").split(":")[0],
@@ -322,10 +317,10 @@ export class ThinkActLoop {
       const heartbeatRun = percept.metadata?.isHeartbeat === true;
       let proactiveQuotaRecorded = false;
 
-      const recordSuccessfulSendMessages = (
+      const recordSuccessfulSendMessages = async (
         actions: AgentResponse["actions"],
         toolResults: ToolResultEntry[],
-      ) => {
+      ): Promise<void> => {
         for (let actionId = 0; actionId < actions.length; actionId++) {
           const action = actions[actionId]!;
           if (action.name !== "send_message") continue;
@@ -345,6 +340,33 @@ export class ThinkActLoop {
               arousalService.recordProactiveMessage(chargeChannelKey);
               proactiveQuotaRecorded = true;
             }
+          }
+
+          if (sendResultAlreadyRecorded(sendResult)) {
+            continue;
+          }
+
+          const sendTarget = readSendTarget(action);
+          const content = readSendMessageContent(action);
+          if (!content) continue;
+
+          const parts = content
+            .split(/<sep\s*\/?>/i)
+            .map((part) => part.trim())
+            .filter(Boolean);
+          for (const part of parts) {
+            await horizonService.events.recordMessage({
+              platform: sendTarget?.platform ?? percept.platform,
+              channelId: sendTarget?.channelId ?? percept.channelId,
+              stage: TimelineStage.Active,
+              timestamp: new Date(),
+              data: {
+                messageId: `agent-send-${percept.traceId}-${actionId}-${Random.id(6, 10)}`,
+                senderId: toolCtx.bot?.selfId ?? "",
+                senderName: toolCtx.bot?.user?.name ?? "",
+                content: part,
+              },
+            });
           }
         }
       };
@@ -404,6 +426,13 @@ export class ThinkActLoop {
           providerType,
           percept,
           roundContext,
+          buildRoundPromptFragments(
+            pluginService,
+            runtimeToolCtx,
+            currentAllowedTools,
+            skillCatalog,
+            roundContext.skillState,
+          ),
         );
 
         if ((this.config.debugLevel ?? 0) >= 3) {
@@ -591,6 +620,13 @@ export class ThinkActLoop {
             providerType,
             percept,
             roundContext,
+            buildRoundPromptFragments(
+              pluginService,
+              runtimeToolCtx,
+              currentAllowedTools,
+              skillCatalog,
+              roundContext.skillState,
+            ),
           );
 
           const wrapResult = await modelService.call(
@@ -688,7 +724,6 @@ export class ThinkActLoop {
       });
       throw err;
     } finally {
-      for (const d of disposers) d();
       const hookService = this.ctx["yesimbot.hook"] as HookService | undefined;
       if (hookService) {
         const endSummary: AgentEndSummary = {
@@ -860,6 +895,7 @@ async function renderSystemPrompt(
   providerType: string | undefined,
   percept: Percept,
   roundContext: RoundContext,
+  localFragments?: PromptFragment[],
 ): Promise<{
   sections: Array<{ name: string; content: string; cacheable?: boolean }>;
   stableContent: string;
@@ -876,7 +912,7 @@ async function renderSystemPrompt(
       scenario: roundContext.snapshot.scenario,
       capabilities: roundContext.snapshot.capabilities,
     },
-    { providerType },
+    { providerType, localFragments },
   );
 
   const stableContent = emitted.stableBlock;
@@ -914,6 +950,22 @@ async function renderSystemPrompt(
     systemPromptString,
     systemParam,
   };
+}
+
+function buildRoundPromptFragments(
+  pluginService: PluginService,
+  toolCtx: ToolExecutionContext,
+  allowedTools: string[],
+  skillCatalog: SkillRegistry | undefined,
+  skillState: RoundContext["skillState"],
+): PromptFragment[] {
+  return [
+    ...buildSkillCatalogPromptFragments(
+      skillCatalog && typeof skillCatalog.all === "function" ? skillCatalog.all() : [],
+      skillState,
+    ),
+    ...buildToolPromptFragments(pluginService, toolCtx, allowedTools),
+  ];
 }
 
 function buildSkillCatalogPromptFragments(
@@ -964,17 +1016,6 @@ function isSameActiveSkillList(next: ActiveSkill[], previous: ActiveSkill[]): bo
   return true;
 }
 
-function registerPromptFragmentSource(
-  promptService: PromptService,
-  disposers: Array<() => void>,
-  name: string,
-  provider: (scope: Record<string, unknown>) => PromptFragment[] | Promise<PromptFragment[]>,
-): void {
-  if (typeof promptService.registerFragmentSource === "function") {
-    disposers.push(promptService.registerFragmentSource(name, provider));
-  }
-}
-
 function toToolResultEntry(
   idx: number,
   name: string,
@@ -1023,15 +1064,65 @@ function formatFinalRoundPrompt(results: ToolResultEntry[]): string {
 function isSuccessfulSendResult(result: ToolResultEntry | undefined): boolean {
   if (!result) return false;
   if (result.error) return false;
-  return result.status === "ok" || result.status === "fulfilled";
+  if (result.success === true && result.status !== "failed") {
+    return true;
+  }
+  return result.status === "ok" || result.status === "fulfilled" || result.status === "success";
 }
 
-function resolveProactiveChargeChannelKey(action: AgentAction, fallbackChannelKey: string): string {
+function sendResultAlreadyRecorded(result: ToolResultEntry | undefined): boolean {
+  const content = result?.result;
+  if (!content || typeof content !== "object") {
+    return false;
+  }
+
+  const payload = content as {
+    messageId?: unknown;
+    messages?: Array<{ messageId?: unknown }>;
+  };
+  if (typeof payload.messageId === "string" && payload.messageId.length > 0) {
+    return true;
+  }
+
+  return Array.isArray(payload.messages)
+    ? payload.messages.some(
+        (message) => typeof message?.messageId === "string" && message.messageId.length > 0,
+      )
+    : false;
+}
+
+function readSendTarget(action: AgentAction): { platform: string; channelId: string } | undefined {
   const target = action.params?.target;
-  if (!target || typeof target !== "object") return fallbackChannelKey;
+  if (!target || typeof target !== "object") return undefined;
 
   const sendTarget = target as { platform?: unknown; channelId?: unknown };
   if (typeof sendTarget.platform !== "string" || typeof sendTarget.channelId !== "string") {
+    return undefined;
+  }
+
+  return {
+    platform: sendTarget.platform,
+    channelId: sendTarget.channelId,
+  };
+}
+
+function readSendMessageContent(action: AgentAction): string {
+  const content = action.params?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+
+  const legacyMessage = action.params?.message;
+  if (typeof legacyMessage === "string") {
+    return legacyMessage;
+  }
+
+  return "";
+}
+
+function resolveProactiveChargeChannelKey(action: AgentAction, fallbackChannelKey: string): string {
+  const sendTarget = readSendTarget(action);
+  if (!sendTarget) {
     return fallbackChannelKey;
   }
 

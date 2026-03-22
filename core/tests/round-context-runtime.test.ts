@@ -201,9 +201,9 @@ describe("round context runtime", () => {
       "yesimbot.skill": {
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
+          instructionBlocks: [],
           toolFilter: { include: [], exclude: [] },
-          styleFragment: null,
+          styleBlock: null,
         }),
       },
       "yesimbot.arousal": undefined,
@@ -313,10 +313,14 @@ describe("round context runtime", () => {
       }),
       expect.objectContaining({
         providerType: "openai",
+        localFragments: expect.any(Array),
       }),
     );
 
     const passedScope = emitPromptBlocksSpy.mock.calls[0]![1] as Record<string, unknown>;
+    const promptOptions = emitPromptBlocksSpy.mock.calls[0]![2] as {
+      localFragments?: Array<{ id: string }>;
+    };
     expect(passedScope.roundContext).toBeTruthy();
     expect((passedScope.roundContext as Record<string, unknown>).snapshot).toBeTruthy();
     expect(passedScope.scenario).toEqual(
@@ -324,11 +328,12 @@ describe("round context runtime", () => {
         derived: expect.objectContaining({ attention: { level: "high" } }),
       }),
     );
-
-    expect(ctx["yesimbot.prompt"].registerFragmentSource).toHaveBeenCalledWith(
-      expect.stringContaining("__loop_tool_fragments_"),
-      expect.any(Function),
+    expect(promptOptions.localFragments?.some((fragment) => fragment.id === "tooling.protocol")).toBe(
+      true,
     );
+    expect(
+      promptOptions.localFragments?.some((fragment) => fragment.id === "tooling.available"),
+    ).toBe(true);
   });
 
   it("completes baseline runtime fields before agent-start hook mutation", async () => {
@@ -337,15 +342,15 @@ describe("round context runtime", () => {
       .fn()
       .mockReturnValueOnce({
         activeSkills: [{ name: "resolve-once" }],
-        promptFragments: [],
+        instructionBlocks: [],
         toolFilter: { include: [], exclude: [] },
-        styleFragment: null,
+        styleBlock: null,
       })
       .mockReturnValueOnce({
         activeSkills: [{ name: "resolve-twice" }],
-        promptFragments: [],
+        instructionBlocks: [],
         toolFilter: { include: [], exclude: [] },
-        styleFragment: null,
+        styleBlock: null,
       });
     const ctx = {
       baseDir: "/tmp",
@@ -546,9 +551,9 @@ describe("round context runtime", () => {
       "yesimbot.skill": {
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
+          instructionBlocks: [],
           toolFilter: { include: [], exclude: [] },
-          styleFragment: null,
+          styleBlock: null,
         }),
       },
       "yesimbot.hook": undefined,

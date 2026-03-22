@@ -1,8 +1,8 @@
 import { Context, h, Schema } from "koishi";
 
-import type { CapabilityState } from "../../../../runtime/contracts";
 import type { FormatterService } from "../../../formatter/service";
 import type { HorizonService } from "../../../horizon/service";
+import type { CapabilityState } from "../../../runtime/contracts";
 import { Action, Metadata, Tool, withInnerThoughts } from "../../decorators";
 import { YesImPlugin } from "../../plugin";
 import { ToolExecutionContext, ToolResult } from "../../types";
@@ -19,7 +19,12 @@ declare module "koishi" {
 
 @Metadata({ name: "onebot", description: "Onebot built-in tools", builtin: true })
 export class OnebotPlugin extends YesImPlugin {
-  static inject = ["yesimbot.plugin", "yesimbot.horizon", "yesimbot.formatter"];
+  static inject = [
+    "yesimbot.plugin",
+    "yesimbot.hook",
+    "yesimbot.horizon",
+    "yesimbot.formatter",
+  ];
 
   private pokeCooldowns = new Map<string, number>();
   private readonly POKE_COOLDOWN_MS = 60_000;
@@ -293,7 +298,7 @@ export class OnebotPlugin extends YesImPlugin {
       const messages = allMessages.slice(0, MAX_FORWARD_MESSAGES);
       const truncated = allMessages.length > MAX_FORWARD_MESSAGES;
 
-      const formatted = this.formatForwardMessages(messages);
+      const formatted = await this.formatForwardMessages(messages);
       const suffix = truncated
         ? `\n\n[Showing ${MAX_FORWARD_MESSAGES} of ${allMessages.length} messages]`
         : "";
@@ -434,24 +439,26 @@ export class OnebotPlugin extends YesImPlugin {
     }
   }
 
-  private formatForwardMessages(messages: Message[]): string {
+  private async formatForwardMessages(messages: Message[]): Promise<string> {
     const formatter = this.ctx["yesimbot.formatter"] as FormatterService | undefined;
 
-    return messages
-      .map((msg) => {
+    const rendered = await Promise.all(
+      messages.map(async (msg) => {
         const sender = `Sender: ${msg.sender.nickname || msg.sender.card || String(msg.sender.user_id)}`;
         const time = `Time: ${new Date(msg.time * 1000).toLocaleString()}`;
 
         let content: string;
         if (formatter && msg.message?.length) {
           const elements = msg.message.map((seg) => h(seg.type, seg.data));
-          content = formatter.format(elements);
+          content = await formatter.format(elements);
         } else {
           content = msg.raw_message;
         }
 
         return `${sender}\n${time}\nContent: ${content}`;
-      })
-      .join("\n\n---\n\n");
+      }),
+    );
+
+    return rendered.join("\n\n---\n\n");
   }
 }

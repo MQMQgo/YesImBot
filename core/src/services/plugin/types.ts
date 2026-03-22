@@ -60,6 +60,12 @@ export interface FunctionDefinition {
   hidden?: boolean;
 }
 
+export interface Activator {
+  check: (ctx: ToolExecutionContext & Record<string, unknown>) => boolean;
+  reason?: string;
+  onFail?: "remove" | "hint";
+}
+
 export interface CapabilityResolver {
   readonly platform?: string;
   readonly resolver: (params: {

@@ -26,17 +26,23 @@
     "fmt": "oxfmt",
     "lint": "oxlint",
     "pub": "yarn npm publish --access public",
+    "test": "node ../../node_modules/vitest/vitest.mjs run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "koishi": "^4.18.3",
-    "koishi-plugin-yesimbot": "workspace:^"
+    "koishi": "^4.18.10",
+    "koishi-plugin-yesimbot": "workspace:^",
+    "vitest": "^4.0.18"
   },
   "peerDependencies": {
-    "koishi": "^4.18.3",
+    "koishi": "^4.18.10",
     "koishi-plugin-yesimbot": "workspace:^"
   },
   "koishi": {
+    "description": {
+      "zh": "Supplemental persona prompt fragments for YesImBot v4",
+      "en": "Supplemental persona prompt fragments for YesImBot v4"
+    },
     "service": {
       "required": [
         "yesimbot.prompt"

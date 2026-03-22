@@ -18,7 +18,7 @@ describe("service debug level propagation regression", () => {
   it("apply passes debugLevel into every in-scope service plugin registration", () => {
     const source = readSource("../src/index.ts");
 
-    expect(source).toContain("ctx.plugin(ImageCacheService, { debugLevel: config.debugLevel })");
+    expectPluginConfigHasDebugLevel(source, "ImageCacheService");
     expect(source).toContain("ctx.plugin(FormatterService, { debugLevel: config.debugLevel })");
     expect(source).toContain(
       "ctx.plugin(ModelService, { concurrency: config.concurrency, debugLevel: config.debugLevel })",

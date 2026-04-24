@@ -1,5 +1,5 @@
 import type { TraitSignal } from "../shared/types";
-import type { ConditionNode } from "./types";
+import type { ConditionNode } from "./legacy-types";
 
 export function evaluateCondition(node: ConditionNode, signals: TraitSignal[]): boolean {
   if ("match" in node)

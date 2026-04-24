@@ -63,16 +63,25 @@ vi.mock("koishi", () => {
   };
 });
 
-import { ThinkActLoop } from "../src/services/agent/loop";
-import { AgentCore } from "../src/services/agent/service";
-import type { AgentStartHookExecutionContext } from "../src/services/hook/types";
 import {
   bindCommittedRoundContext,
   buildCapabilitiesFromRuntime,
   commitRoundContext,
   createRoundContext,
-} from "../src/services/runtime/adapters";
-import type { Percept } from "../src/services/runtime/contracts";
+} from "../src/runtime/adapters";
+import { DEFAULT_SCENARIO_TIMELINE_SEMANTICS, type Percept } from "../src/runtime/contracts";
+import { ThinkActLoop } from "../src/services/agent/loop";
+import { AgentCore } from "../src/services/agent/service";
+
+function createScenarioTimeline() {
+  return {
+    turns: [],
+    activeSegment: { mode: "after-latest-summary" as const },
+    markedEvents: [],
+    heartbeatEvents: [],
+    semantics: DEFAULT_SCENARIO_TIMELINE_SEMANTICS,
+  };
+}
 
 describe("round context runtime", () => {
   it("AgentCore builds Percept without copying message content or sender name", () => {
@@ -192,9 +201,9 @@ describe("round context runtime", () => {
       "yesimbot.skill": {
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
+          instructionBlocks: [],
           toolFilter: { include: [], exclude: [] },
-          styleFragment: null,
+          styleBlock: null,
         }),
       },
       "yesimbot.arousal": undefined,
@@ -223,7 +232,8 @@ describe("round context runtime", () => {
             channelId: "c1",
           },
           entities: [],
-          timeline: [],
+          timeline: createScenarioTimeline(),
+          scenarioTimeline: createScenarioTimeline(),
           stimulusSource: { type: "message", messageId: "m1", senderId: "u1" },
         },
         derived: {
@@ -303,10 +313,14 @@ describe("round context runtime", () => {
       }),
       expect.objectContaining({
         providerType: "openai",
+        localFragments: expect.any(Array),
       }),
     );
 
     const passedScope = emitPromptBlocksSpy.mock.calls[0]![1] as Record<string, unknown>;
+    const promptOptions = emitPromptBlocksSpy.mock.calls[0]![2] as {
+      localFragments?: Array<{ id: string }>;
+    };
     expect(passedScope.roundContext).toBeTruthy();
     expect((passedScope.roundContext as Record<string, unknown>).snapshot).toBeTruthy();
     expect(passedScope.scenario).toEqual(
@@ -314,11 +328,12 @@ describe("round context runtime", () => {
         derived: expect.objectContaining({ attention: { level: "high" } }),
       }),
     );
-
-    expect(toolCtxCapture.length).toBeGreaterThan(0);
-    const capturedCtx = toolCtxCapture[0] as Record<string, unknown>;
-    expect(capturedCtx.roundContext).toBeTruthy();
-    expect(capturedCtx.scenario).toBeTruthy();
+    expect(promptOptions.localFragments?.some((fragment) => fragment.id === "tooling.protocol")).toBe(
+      true,
+    );
+    expect(
+      promptOptions.localFragments?.some((fragment) => fragment.id === "tooling.available"),
+    ).toBe(true);
   });
 
   it("completes baseline runtime fields before agent-start hook mutation", async () => {
@@ -327,15 +342,15 @@ describe("round context runtime", () => {
       .fn()
       .mockReturnValueOnce({
         activeSkills: [{ name: "resolve-once" }],
-        promptFragments: [],
+        instructionBlocks: [],
         toolFilter: { include: [], exclude: [] },
-        styleFragment: null,
+        styleBlock: null,
       })
       .mockReturnValueOnce({
         activeSkills: [{ name: "resolve-twice" }],
-        promptFragments: [],
+        instructionBlocks: [],
         toolFilter: { include: [], exclude: [] },
-        styleFragment: null,
+        styleBlock: null,
       });
     const ctx = {
       baseDir: "/tmp",
@@ -536,9 +551,9 @@ describe("round context runtime", () => {
       "yesimbot.skill": {
         resolve: vi.fn().mockReturnValue({
           activeSkills: [],
-          promptFragments: [],
+          instructionBlocks: [],
           toolFilter: { include: [], exclude: [] },
-          styleFragment: null,
+          styleBlock: null,
         }),
       },
       "yesimbot.hook": undefined,
@@ -568,7 +583,8 @@ describe("round context runtime", () => {
             channelId: "stale-c1",
           },
           entities: [],
-          timeline: [],
+          timeline: createScenarioTimeline(),
+          scenarioTimeline: createScenarioTimeline(),
           stimulusSource: { type: "message", messageId: "stale", senderId: "u0" },
         },
         derived: {
@@ -641,7 +657,8 @@ describe("round context runtime", () => {
             channelId: "c1",
           },
           entities: [],
-          timeline: [],
+          timeline: createScenarioTimeline(),
+          scenarioTimeline: createScenarioTimeline(),
           stimulusSource: { type: "message" },
         },
         derived: {
@@ -687,7 +704,8 @@ describe("round context runtime", () => {
             channelId: "c1",
           },
           entities: [],
-          timeline: [],
+          timeline: createScenarioTimeline(),
+          scenarioTimeline: createScenarioTimeline(),
           stimulusSource: { type: "message" },
         },
         derived: {
@@ -710,9 +728,9 @@ describe("round context runtime", () => {
     expect(roundContext.skillState.persistentRoster).toEqual(["foo"]);
   });
 
-  it("runtime and hook contracts include explicit skill loading fields", () => {
+  it("runtime and hook contracts expose persisted skill state without hook-side skill loading", () => {
     const runtimeContracts = readFileSync(
-      new URL("../src/services/runtime/contracts.ts", import.meta.url),
+      new URL("../src/runtime/contracts.ts", import.meta.url),
       "utf8",
     );
     const hookTypes = readFileSync(
@@ -722,10 +740,7 @@ describe("round context runtime", () => {
 
     expect(runtimeContracts).toContain("loadHistory?: LoadAttempt[]");
     expect(runtimeContracts).toContain("persistentRoster?: string[]");
-    expect(hookTypes).toContain("loadSkill(skillName: string): Promise<LoadResult>");
-    expect(hookTypes).toContain("getLoadedSkills(): SkillDefinition[]");
+    expect(hookTypes).not.toContain("loadSkill(skillName: string)");
+    expect(hookTypes).not.toContain("getLoadedSkills(): SkillDefinition[]");
   });
 });
-
-type _AgentStartHookHasLoadSkill = AgentStartHookExecutionContext["loadSkill"];
-type _AgentStartHookHasGetLoadedSkills = AgentStartHookExecutionContext["getLoadedSkills"];

@@ -1,7 +1,11 @@
 import { Context, Random, Service } from "koishi";
 
 import type { HorizonService } from "../horizon/service";
-import type { HorizonMessageEvent } from "../horizon/types";
+import type {
+  HorizonMessageEvent,
+  ImageDescriptionConfig,
+  ImageMode,
+} from "../horizon/types";
 import type { ModelService } from "../model/service";
 import { ToolExecutionContext } from "../plugin/types";
 import type { RoleService } from "../role/service";
@@ -79,10 +83,11 @@ export interface AgentCoreConfig {
   willingness?: WillingnessConfig;
   aggregationWindow?: number;
   errorReportChannel?: string;
-  debugLevel?: 0 | 1 | 2 | 3;
-  imageMode?: "native" | "off";
+  debugLevel?: number;
+  imageMode?: ImageMode;
   maxImagesInContext?: number;
   imageLifecycleCount?: number;
+  imageDescription?: ImageDescriptionConfig;
 }
 
 interface PendingWindow {
@@ -99,6 +104,9 @@ interface DMWindow {
   traceId: string;
 }
 
+const INBOUND_MESSAGE_DEDUP_TTL_MS = 10 * 60 * 1000;
+const INBOUND_MESSAGE_DEDUP_MAX_ENTRIES = 5000;
+
 export class AgentCore extends Service<AgentCoreConfig> {
   static inject = [
     "yesimbot.horizon",
@@ -107,6 +115,7 @@ export class AgentCore extends Service<AgentCoreConfig> {
     "yesimbot.model",
     "yesimbot.trait",
     "yesimbot.skill",
+    "yesimbot.session",
     "yesimbot.role",
     "yesimbot.hook",
     "yesimbot.arousal",
@@ -118,6 +127,7 @@ export class AgentCore extends Service<AgentCoreConfig> {
   private deferredTimers = new Map<string, () => void>();
   private deferredGen = new Map<string, number>();
   private dmWindows = new Map<string, DMWindow>();
+  private seenInboundMessages = new Map<string, number>();
   private loop!: ThinkActLoop;
   private willingness!: WillingnessEngine;
   private rateLimiter!: { dm: TokenBucket; group: TokenBucket };
@@ -126,7 +136,7 @@ export class AgentCore extends Service<AgentCoreConfig> {
     super(ctx, "yesimbot.agent", false);
     this.config = config;
     this.logger = ctx.logger("agent");
-    this.logger.level = config.debugLevel || 2;
+    this.logger.level = config.debugLevel ?? 2;
     this.ctx.command("yesimbot.agent", "AgentCore 调试指令", { authority: 3 });
   }
 
@@ -157,6 +167,9 @@ export class AgentCore extends Service<AgentCoreConfig> {
     try {
       const traceId = `msg-${Random.id(8, 16)}`;
       const channelKey = `${event.platform}:${event.channelId}`;
+      if (this.shouldSkipDuplicateInboundMessage(event, traceId, channelKey)) {
+        return;
+      }
 
       // Rate limit check — before any processing
       const userId = event.payload.senderId;
@@ -215,6 +228,48 @@ export class AgentCore extends Service<AgentCoreConfig> {
       this.pendingWindows.set(channelKey, { cancel, lastEvent: event });
     } catch (err: unknown) {
       this.logger.error(`handleEvent error: ${err}`);
+    }
+  }
+
+  private shouldSkipDuplicateInboundMessage(
+    event: HorizonMessageEvent,
+    traceId: string,
+    channelKey: string,
+  ): boolean {
+    const messageId = event.payload.messageId?.trim();
+    if (!messageId) return false;
+
+    const now = Date.now();
+    this.pruneSeenInboundMessages(now);
+
+    const dedupKey = `${channelKey}:${messageId}`;
+    const seenAt = this.seenInboundMessages.get(dedupKey);
+    if (typeof seenAt === "number" && now - seenAt < INBOUND_MESSAGE_DEDUP_TTL_MS) {
+      this.logger.debug(`[${traceId}] duplicate inbound message ignored ${dedupKey}`);
+      return true;
+    }
+
+    if (typeof seenAt === "number") {
+      this.seenInboundMessages.delete(dedupKey);
+    }
+    this.seenInboundMessages.set(dedupKey, now);
+    this.trimSeenInboundMessages();
+    return false;
+  }
+
+  private pruneSeenInboundMessages(now: number): void {
+    for (const [key, seenAt] of this.seenInboundMessages) {
+      if (now - seenAt >= INBOUND_MESSAGE_DEDUP_TTL_MS) {
+        this.seenInboundMessages.delete(key);
+      }
+    }
+  }
+
+  private trimSeenInboundMessages(): void {
+    while (this.seenInboundMessages.size > INBOUND_MESSAGE_DEDUP_MAX_ENTRIES) {
+      const oldestKey = this.seenInboundMessages.keys().next().value;
+      if (!oldestKey) break;
+      this.seenInboundMessages.delete(oldestKey);
     }
   }
 

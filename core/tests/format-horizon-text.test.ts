@@ -129,6 +129,23 @@ describe("MessageHandler", () => {
     expect(result[0].role).toBe("user");
   });
 
+  it("returns assistant role for self-authored message records", async () => {
+    const record = createMessageRecord({
+      data: {
+        messageId: "bot-msg-1",
+        senderId: "bot-1",
+        senderName: "Athena",
+        content: "I already answered that above.",
+      },
+    });
+
+    const result = await handler.handle(record, baseOptions);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].role).toBe("assistant");
+    expect(result[0].content).toBe("I already answered that above.");
+  });
+
   it("assigns short ID using shortIdAssigner", async () => {
     let lastAssignedId = 0;
     const record = createMessageRecord({

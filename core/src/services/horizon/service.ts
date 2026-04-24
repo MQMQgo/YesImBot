@@ -1,21 +1,23 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { Context, h, Schema, Service, type Session } from "koishi";
+import { Context, h, Service, type Session } from "koishi";
 
+import type { ChannelKey, Percept, ScenarioTimeline } from "../../runtime/contracts";
+import { buildScenarioTimeline } from "../../runtime/scenario-timeline";
 import type { LoopMessage } from "../agent/trimmer";
-import type { ChannelKey, Percept, ScenarioTimeline } from "../runtime/contracts";
-import { buildScenarioTimeline } from "../runtime/scenario-timeline";
+import type { CacheEntry } from "../image-cache/types";
 import { SummaryCompressor } from "./compressor";
 import { EnvironmentManager } from "./environment";
+import { ImageDescriber } from "./image-describer";
 import { EventListener } from "./listener";
 import { EventManager } from "./manager";
 import type {
   AllowedChannel,
+  ImageConfig,
   Entity,
   EntityRecord,
   HorizonView,
-  ImageConfig,
   Role,
   SelfInfo,
   TimelineEntry,
@@ -36,6 +38,7 @@ declare module "koishi" {
 
 export interface HorizonServiceConfig {
   allowedChannels: AllowedChannel[];
+  debugLevel?: number;
   keywords?: string[];
   aggregationWindow?: number;
   historyLimit?: number;
@@ -48,31 +51,6 @@ export interface HorizonServiceConfig {
   inactivityTriggerMs?: number;
   retainRecentEntries?: number;
 }
-
-export const HorizonServiceConfigSchema: Schema<HorizonServiceConfig> = Schema.object({
-  allowedChannels: Schema.array(
-    Schema.object({
-      platform: Schema.string().required(),
-      type: Schema.union(["private", "guild"]).required(),
-      id: Schema.string().required(),
-    }),
-  )
-    .default([])
-    .role("table"),
-  keywords: Schema.array(Schema.string()).default([]),
-  aggregationWindow: Schema.number().default(1500),
-  historyLimit: Schema.number().default(30),
-  archiveThresholdMs: Schema.number().default(86400000),
-  botName: Schema.string(),
-  entityCacheTtl: Schema.number().default(3600000),
-  maxActiveEntities: Schema.number().default(15),
-  summaryModel: Schema.string().description(
-    "Model ID for summary generation (e.g., 'openai:gpt-4o-mini')",
-  ),
-  cleanupIntervalMs: Schema.number()
-    .default(3_600_000)
-    .description("Interval in ms for periodic cleanup (default: 1 hour)"),
-});
 
 export class HorizonService extends Service<HorizonServiceConfig> {
   static inject = [
@@ -91,6 +69,7 @@ export class HorizonService extends Service<HorizonServiceConfig> {
   private shortIdMaps = new Map<string, Map<string, number>>(); // channelKey -> (nativeMsgId -> shortId)
   private shortIdReverse = new Map<string, Map<number, string>>(); // channelKey -> (shortId -> nativeMsgId)
   private botRoleCache = new Map<string, { role: Role | null; fetchedAt: number }>();
+  private readonly imageDescriber: ImageDescriber;
 
   private environments: EnvironmentManager;
   private cleanupTimer?: ReturnType<typeof setInterval>;
@@ -98,6 +77,7 @@ export class HorizonService extends Service<HorizonServiceConfig> {
   constructor(ctx: Context, config: HorizonServiceConfig) {
     super(ctx, "yesimbot.horizon", false);
     this.config = config;
+    this.logger.level = config.debugLevel ?? 2;
     this.events = new EventManager(ctx);
     this.listener = new EventListener(ctx, this.events, this.config);
     this.compressor = new SummaryCompressor(ctx, this.events, config.summaryModel, {
@@ -105,6 +85,7 @@ export class HorizonService extends Service<HorizonServiceConfig> {
       inactivityTriggerMs: config.inactivityTriggerMs,
       retainRecentEntries: config.retainRecentEntries,
     });
+    this.imageDescriber = new ImageDescriber(ctx);
     this.loadShortIdMaps();
     this.environments = new EnvironmentManager(ctx, config.entityCacheTtl);
     this.ctx.command("yesimbot.history", "上下文指令集", { authority: 3 });
@@ -422,6 +403,8 @@ export class HorizonService extends Service<HorizonServiceConfig> {
       getShortId: (ck: string, msgId: string) => this.getShortId(ck, msgId),
       getImageCache: (id: string) => this.ctx["yesimbot.image-cache"].get(id),
       parseElements: (text: string) => h.parse(text),
+      describeImage: (id: string, image: CacheEntry) =>
+        this.imageDescriber.describeImage(id, image, imageConfig?.description),
     };
 
     const messages: LoopMessage[] = [];

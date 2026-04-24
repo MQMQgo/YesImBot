@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 
 import { Context, Schema, Service } from "koishi";
 
@@ -17,6 +15,7 @@ declare module "koishi" {
 export interface PromptServiceConfig {
   templates?: Record<string, string>;
   renderTimeout?: number;
+  debugLevel?: number;
 }
 
 interface CanonicalPromptSection {
@@ -28,6 +27,11 @@ interface CanonicalPromptSection {
 
 export interface PromptEmitOptions {
   providerType?: string;
+  localFragments?: PromptFragment[];
+}
+
+export interface PromptRenderOptions {
+  localFragments?: PromptFragment[];
 }
 
 export interface PromptEmitBlocks {
@@ -40,6 +44,7 @@ export interface PromptEmitBlocks {
 export const PromptServiceConfigSchema: Schema<PromptServiceConfig> = Schema.object({
   templates: Schema.dict(Schema.string()),
   renderTimeout: Schema.number().default(5000),
+  debugLevel: Schema.number().min(0).max(3).step(1),
 });
 
 export class PromptService extends Service<PromptServiceConfig> {
@@ -55,6 +60,7 @@ export class PromptService extends Service<PromptServiceConfig> {
     super(ctx, "yesimbot.prompt", true);
     this.config = config;
     this.logger = this.ctx.logger("yesimbot.prompt");
+    this.logger.level = config.debugLevel ?? 2;
   }
 
   registerSnippet(name: string, fn: Snippet): void {
@@ -86,15 +92,20 @@ export class PromptService extends Service<PromptServiceConfig> {
   async render(
     _templateName: string,
     initialScope?: Record<string, unknown>,
+    options?: PromptRenderOptions,
   ): Promise<RenderedPromptSection[]> {
     const scope = await this.buildScope(initialScope ?? {});
-    return this.renderCanonicalLayout(scope);
+    return this.renderCanonicalLayout(scope, options);
   }
 
-  async renderCanonicalLayout(scope: Record<string, unknown>): Promise<RenderedPromptSection[]> {
-    const collected = await this.collectFragments(scope);
-    const validated = collected.map((fragment) => this.validateFragment(fragment));
-    const canonicalSections = this.buildCanonicalSections(validated);
+  async renderCanonicalLayout(
+    scope: Record<string, unknown>,
+    options?: PromptRenderOptions,
+  ): Promise<RenderedPromptSection[]> {
+    const canonicalSections = await this.buildCanonicalSectionsForScope(
+      scope,
+      options?.localFragments,
+    );
     return canonicalSections.map((section) => ({
       name: section.name,
       content: section.content,
@@ -105,12 +116,13 @@ export class PromptService extends Service<PromptServiceConfig> {
   async emitPromptBlocks(
     _templateName: string,
     initialScope?: Record<string, unknown>,
-    _options?: PromptEmitOptions,
+    options?: PromptEmitOptions,
   ): Promise<PromptEmitBlocks> {
     const scope = await this.buildScope(initialScope ?? {});
-    const collected = await this.collectFragments(scope);
-    const validated = collected.map((fragment) => this.validateFragment(fragment));
-    const canonicalSections = this.buildCanonicalSections(validated);
+    const canonicalSections = await this.buildCanonicalSectionsForScope(
+      scope,
+      options?.localFragments,
+    );
 
     const sections: RenderedPromptSection[] = canonicalSections.map((section) => ({
       name: section.name,
@@ -135,12 +147,16 @@ export class PromptService extends Service<PromptServiceConfig> {
   async renderToString(
     templateName: string,
     initialScope?: Record<string, unknown>,
+    options?: PromptRenderOptions,
   ): Promise<string> {
-    const sections = await this.render(templateName, initialScope);
+    const sections = await this.render(templateName, initialScope, options);
     return sections.map((s) => s.content).join("\n\n");
   }
 
-  private async collectFragments(scope: Record<string, unknown>): Promise<PromptFragment[]> {
+  private async collectFragments(
+    scope: Record<string, unknown>,
+    localFragments?: PromptFragment[],
+  ): Promise<PromptFragment[]> {
     const fragments: PromptFragment[] = [];
 
     for (const [sourceName, provider] of this.fragmentSources) {
@@ -151,7 +167,20 @@ export class PromptService extends Service<PromptServiceConfig> {
       fragments.push(...provided);
     }
 
+    if (localFragments?.length) {
+      fragments.push(...localFragments);
+    }
+
     return fragments;
+  }
+
+  private async buildCanonicalSectionsForScope(
+    scope: Record<string, unknown>,
+    localFragments?: PromptFragment[],
+  ): Promise<CanonicalPromptSection[]> {
+    const collected = await this.collectFragments(scope, localFragments);
+    const validated = collected.map((fragment) => this.validateFragment(fragment));
+    return this.buildCanonicalSections(validated);
   }
 
   private compareFragments(a: PromptFragment, b: PromptFragment): number {

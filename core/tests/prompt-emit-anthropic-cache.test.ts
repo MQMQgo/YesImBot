@@ -1,8 +1,8 @@
 import type { Context } from "koishi";
 import { describe, expect, it, vi } from "vitest";
 
+import type { PromptFragment } from "../src/services/prompt";
 import { PromptService } from "../src/services/prompt/service";
-import type { PromptFragment } from "../src/services/prompt/types";
 
 type FragmentProvider = (
   scope: Record<string, unknown>,
@@ -35,7 +35,7 @@ describe("prompt emit anthropic cache", () => {
       {
         id: "identity.base",
         section: "identity",
-        source: "role",
+        source: "persona",
         priority: 100,
         stability: "stable",
         cacheable: true,
@@ -99,7 +99,7 @@ describe("prompt emit anthropic cache", () => {
       {
         id: "identity.base",
         section: "identity",
-        source: "role",
+        source: "persona",
         priority: 100,
         stability: "stable",
         cacheable: true,
@@ -144,5 +144,63 @@ describe("prompt emit anthropic cache", () => {
     expect(emitted.stableBlock).toContain("identity");
     expect(emitted.stableBlock).toContain("memory");
     expect(emitted.dynamicBlock).toContain("situation");
+  });
+
+  it("isolates request-local fragments across concurrent prompt emits", async () => {
+    const service = createPromptService();
+
+    (
+      service as unknown as {
+        registerFragmentSource: (name: string, provider: FragmentProvider) => void;
+      }
+    ).registerFragmentSource("base", () => [
+      {
+        id: "identity.base",
+        section: "identity",
+        source: "persona",
+        priority: 100,
+        stability: "stable",
+        cacheable: true,
+        content: "identity",
+      },
+    ]);
+
+    function buildLocalFragments(label: string): PromptFragment[] {
+      return [
+        {
+          id: "tooling.protocol",
+          section: "policy",
+          source: "tooling",
+          priority: 500,
+          stability: "stable",
+          cacheable: true,
+          content: `protocol ${label}`,
+        },
+        {
+          id: "tooling.available",
+          section: "situation",
+          source: "tooling",
+          priority: 520,
+          stability: "dynamic",
+          cacheable: false,
+          content: `available ${label}`,
+        },
+      ];
+    }
+
+    const [first, second] = await Promise.all([
+      service.emitPromptBlocks("system", {}, { localFragments: buildLocalFragments("alpha") }),
+      service.emitPromptBlocks("system", {}, { localFragments: buildLocalFragments("beta") }),
+    ]);
+
+    expect(first.stableBlock).toContain("protocol alpha");
+    expect(first.stableBlock).not.toContain("protocol beta");
+    expect(first.dynamicBlock).toContain("available alpha");
+    expect(first.dynamicBlock).not.toContain("available beta");
+
+    expect(second.stableBlock).toContain("protocol beta");
+    expect(second.stableBlock).not.toContain("protocol alpha");
+    expect(second.dynamicBlock).toContain("available beta");
+    expect(second.dynamicBlock).not.toContain("available alpha");
   });
 });

@@ -1,9 +1,25 @@
 import { Context, Schema } from "koishi";
-import type { PromptFragment, PromptService } from "koishi-plugin-yesimbot/services/prompt";
+
+type PromptFragment = {
+  id: string;
+  section: "identity" | "policy" | "memory" | "situation";
+  source: "persona" | "memory" | "scenario" | "capability" | "skill" | "hook" | "tooling";
+  stability: "stable" | "dynamic";
+  priority: number;
+  cacheable?: boolean;
+  content: string;
+};
+
+interface PromptServiceLike {
+  registerFragmentSource?: (
+    name: string,
+    provider: () => Promise<PromptFragment[]> | PromptFragment[],
+  ) => () => void;
+}
 
 declare module "koishi" {
   interface Context {
-    "yesimbot.prompt": PromptService;
+    "yesimbot.prompt": PromptServiceLike;
   }
 }
 
@@ -68,11 +84,12 @@ export function apply(ctx: Context, config: Config): void {
   const text = buildPersonaText(config);
   if (!text) return;
 
-  const prompt = ctx["yesimbot.prompt"] as PromptService;
+  const prompt = ctx["yesimbot.prompt"] as PromptServiceLike;
   if (typeof prompt.registerFragmentSource === "function") {
-    const dispose = prompt.registerFragmentSource("persona", async (): Promise<PromptFragment[]> => [
-      buildPersonaFragment(text),
-    ]);
+    const dispose = prompt.registerFragmentSource(
+      "persona-plugin",
+      async (): Promise<PromptFragment[]> => [buildPersonaFragment(text)],
+    );
     ctx.on("dispose", () => dispose());
     return;
   }

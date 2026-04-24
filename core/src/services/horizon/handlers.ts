@@ -1,6 +1,7 @@
 import type { ImagePart, TextPart, UserContent } from "ai";
 
 import type { LoopMessage } from "../agent/trimmer";
+import type { CacheEntry } from "../image-cache/types";
 import type {
   AgentActionRecord,
   AgentResponseRecord,
@@ -26,6 +27,7 @@ export interface BuildContextOptions {
   ) => Array<{ type: string; attrs: Record<string, unknown>; toString: () => string }>;
   shouldEmbedImage?: (id: string) => boolean;
   incrementLifecycle?: (id: string) => void;
+  describeImage?: (id: string, image: CacheEntry) => Promise<string | undefined>;
 }
 
 abstract class TimelineHandler<T extends TimelineEntry> {
@@ -40,6 +42,7 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
 
   async handle(entry: MessageRecord, options: BuildContextOptions): Promise<LoopMessage[]> {
     const {
+      selfId,
       shortIdAssigner,
       getShortId,
       channelKey,
@@ -48,8 +51,15 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
       parseElements,
       shouldEmbedImage,
       incrementLifecycle,
+      describeImage,
     } = options;
     const { data, timestamp } = entry;
+
+    // Messages sent by the bot are part of the visible conversation history and
+    // should be replayed as assistant turns rather than re-labeled as user XML.
+    if (selfId && data.senderId === selfId) {
+      return [{ role: "assistant", content: data.content }];
+    }
 
     // Assign short ID
     const shortId = shortIdAssigner && channelKey ? shortIdAssigner(channelKey, data.messageId) : 0;
@@ -103,6 +113,50 @@ class MessageHandler extends TimelineHandler<MessageRecord> {
         }
 
         return [{ role: "user", content: parts }];
+      }
+    }
+
+    if (
+      imageConfig?.imageMode === "description" &&
+      parseElements &&
+      getImageCache &&
+      shouldEmbedImage &&
+      describeImage
+    ) {
+      const elements = parseElements(data.content);
+      const imgElements = elements.filter((el) => el.type === "img");
+      const descriptions: string[] = [];
+
+      for (const el of imgElements) {
+        const id = el.attrs.id as string | undefined;
+        const status = el.attrs.status as string | undefined;
+        if (!id || status === "failed") continue;
+        if (!shouldEmbedImage(id)) continue;
+
+        const cache = await getImageCache(id);
+        if (!cache || cache.status === "failed") continue;
+
+        const description = await describeImage(id, cache);
+        if (!description) continue;
+
+        if (incrementLifecycle) incrementLifecycle(id);
+        descriptions.push(
+          `<image id="${escapeXmlAttr(id)}">${escapeXml(description)}</image>`,
+        );
+      }
+
+      if (descriptions.length > 0) {
+        return [
+          {
+            role: "user",
+            content: [
+              msgText,
+              "<image_descriptions>",
+              ...descriptions,
+              "</image_descriptions>",
+            ].join("\n"),
+          },
+        ];
       }
     }
 
@@ -209,3 +263,15 @@ export {
   SummaryHandler,
 };
 export type { TimelineHandler };
+
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeXmlAttr(text: string): string {
+  return escapeXml(text).replace(/'/g, "&apos;");
+}

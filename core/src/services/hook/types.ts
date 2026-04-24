@@ -1,6 +1,10 @@
+import type {
+  AgentEndSummary,
+  Capabilities,
+  RoundContext,
+  Scenario,
+} from "../../runtime/contracts";
 import type { ToolExecutionContext } from "../plugin/types";
-import type { AgentEndSummary, Capabilities, RoundContext, Scenario } from "../runtime/contracts";
-import type { LoadResult, SkillDefinition } from "../skill/types";
 
 export enum HookType {
   Tool = "tool",
@@ -32,8 +36,6 @@ interface AgentLifecycleHookExecutionContextBase extends HookExecutionContext {
 export interface AgentStartHookExecutionContext extends AgentLifecycleHookExecutionContextBase {
   hookPhase: HookPhase.Before;
   lifecycle: "start";
-  loadSkill(skillName: string): Promise<LoadResult>;
-  getLoadedSkills(): SkillDefinition[];
 }
 
 export interface AgentEndHookExecutionContext extends AgentLifecycleHookExecutionContextBase {
@@ -64,6 +66,7 @@ export type HookFailureReason = "timeout" | "error";
 export interface HookServiceConfig {
   hookTimeouts?: HookTimeoutsConfig;
   logLevel?: number;
+  debugLevel?: number;
 }
 
 export type BeforeHookResult<T> =

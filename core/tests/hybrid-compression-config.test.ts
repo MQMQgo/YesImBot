@@ -56,6 +56,7 @@ import { Context } from "koishi";
 import { apply, type Config } from "../src/index";
 import { SummaryCompressor } from "../src/services/horizon/compressor";
 import { HorizonService } from "../src/services/horizon/service";
+import { ImageCacheService } from "../src/services/image-cache/service";
 import { MemoryAgentService } from "../src/services/memory-agent";
 
 vi.mock("../src/services/horizon/compressor", () => {
@@ -121,6 +122,13 @@ function createBaseConfig(overrides: Partial<Config> = {}): Config {
     imageMode: "native",
     maxImagesInContext: 3,
     imageLifecycleCount: 3,
+    imageCache: {
+      autoCleanupEnabled: true,
+      maxCachedImages: 1000,
+      imageTtlMs: 7 * 24 * 3600 * 1000,
+      flushIntervalMs: 30_000,
+      cleanupIntervalMs: 3_600_000,
+    },
     memoryAgent: {
       coreMemoryBudget: 2000,
       summaryModel: "openai:gpt-4o-mini",
@@ -167,6 +175,43 @@ describe("Hybrid compression trigger config wiring", () => {
     });
   });
 
+  it("passes image cache config through apply() into ImageCacheService", () => {
+    const ctx = {
+      logger: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn() })),
+      command: vi.fn(() => ({
+        subcommand: vi.fn(() => ({ action: vi.fn() })),
+      })),
+      plugin: vi.fn(),
+      on: vi.fn(),
+      scope: { update: vi.fn() },
+    } as unknown as Context;
+
+    const config = createBaseConfig({
+      imageCache: {
+        autoCleanupEnabled: false,
+        maxCachedImages: 128,
+        imageTtlMs: 86_400_000,
+        flushIntervalMs: 10_000,
+        cleanupIntervalMs: 20_000,
+      },
+    });
+
+    apply(ctx, config);
+
+    const imageCacheCall = (ctx.plugin as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) => call[0] === ImageCacheService,
+    );
+    expect(imageCacheCall).toBeDefined();
+    expect(imageCacheCall?.[1]).toMatchObject({
+      autoCleanupEnabled: false,
+      maxCachedImages: 128,
+      imageTtlMs: 86_400_000,
+      flushIntervalMs: 10_000,
+      cleanupIntervalMs: 20_000,
+      debugLevel: 0,
+    });
+  });
+
   it("keeps trigger ownership outside memoryAgent when apply() receives mixed config", () => {
     const ctx = {
       logger: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn() })),
@@ -204,12 +249,13 @@ describe("Hybrid compression trigger config wiring", () => {
       retainRecentEntries: 12,
     });
     expect(horizonCall?.[1]).not.toHaveProperty("memoryAgent.compressionThreshold");
-    expect(memoryCall?.[1]).toEqual({
+    expect(memoryCall?.[1]).toMatchObject({
       memoryAgent: {
         coreMemoryBudget: 4096,
         summaryModel: "openai:gpt-4o",
         maxAgentSteps: 30,
       },
+      debugLevel: 0,
     });
   });
 

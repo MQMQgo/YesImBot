@@ -19,7 +19,12 @@ declare module "koishi" {
 
 @Metadata({ name: "onebot", description: "Onebot built-in tools", builtin: true })
 export class OnebotPlugin extends YesImPlugin {
-  static inject = ["yesimbot.plugin", "yesimbot.horizon", "yesimbot.formatter"];
+  static inject = [
+    "yesimbot.plugin",
+    "yesimbot.hook",
+    "yesimbot.horizon",
+    "yesimbot.formatter",
+  ];
 
   private pokeCooldowns = new Map<string, number>();
   private readonly POKE_COOLDOWN_MS = 60_000;

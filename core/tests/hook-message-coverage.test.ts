@@ -41,8 +41,14 @@ vi.mock("koishi", () => {
     Schema: schemaMock,
     Context: class {},
     Service: class {
-      logger = { warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
-      constructor(..._args: unknown[]) {}
+      logger = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), level: 0 };
+      ctx: Record<string, unknown>;
+      constructor(ctx?: unknown, ..._args: unknown[]) {
+        this.ctx = (ctx ?? {}) as Record<string, unknown>;
+      }
+    },
+    Random: {
+      id: vi.fn(() => "mock-msg-id"),
     },
     h: hMock,
     sleep: vi.fn(async () => undefined),
@@ -63,6 +69,7 @@ function createMessageRuntimeHarness() {
   const rootCtx = {
     logger: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn() })),
     on: vi.fn(),
+    emit: vi.fn(),
     bots: [],
     "yesimbot.plugin": pluginRegistry,
     "yesimbot.horizon": {
@@ -71,8 +78,13 @@ function createMessageRuntimeHarness() {
   } as unknown as Record<string, unknown>;
 
   const hookService = new HookService(rootCtx as never);
-  (hookService as unknown as { logger: { warn: ReturnType<typeof vi.fn> } }).logger = {
+  (
+    hookService as unknown as {
+      logger: { warn: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> };
+    }
+  ).logger = {
     warn: vi.fn(),
+    debug: vi.fn(),
   };
   rootCtx["yesimbot.hook"] = hookService;
 
@@ -197,6 +209,26 @@ describe("Message Hook Coverage", () => {
     });
     expect(sessionSend).not.toHaveBeenCalled();
     expect(botSendMessage).not.toHaveBeenCalled();
+  });
+
+  it("accepts legacy message param for send_message transport", async () => {
+    const harness = createMessageRuntimeHarness();
+    const sessionSend = vi.fn(async () => undefined);
+    const toolCtx: ToolExecutionContext = {
+      platform: "discord",
+      channelId: "c-1",
+      session: { send: sessionSend } as never,
+      percept: { traceId: "trace-message-legacy" } as never,
+    };
+
+    const result = await harness.plugin.sendMessage(
+      { message: "legacy payload still works" },
+      toolCtx,
+    );
+
+    expect(result.success).toBe(true);
+    expect(sessionSend).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(sessionSend.mock.calls[0]?.[0])).toContain("legacy payload still works");
   });
 
   describe("Uncovered Paths (By Design)", () => {

@@ -7,7 +7,7 @@ import {
   Metadata,
   Success,
   Tool,
-  ToolResult,
+  type ToolResult,
   withInnerThoughts,
   YesImPlugin,
 } from "koishi-plugin-yesimbot/services/plugin";
@@ -19,6 +19,77 @@ import zhCN from "./locales/zh-CN.json";
 import type { SearchBackend, SearchPluginConfig } from "./types";
 
 const builtinSkillsDir = join(__dirname, "../", "resources/skills");
+const SEARCH_SKILL_NAME = "search";
+const SEARCH_HINT_PATTERNS = [
+  /\b(latest|current|today|news|price|pricing|version|release|docs?|documentation|look up|lookup|search|web|online|verify|fact[- ]?check|recent)\b/i,
+  /https?:\/\//i,
+  /(?:\u6700\u65b0|\u6700\u8fd1|\u4eca\u5929|\u4eca\u65e5|\u65b0\u95fb|\u67e5\u4e00\u4e0b|\u641c\u4e00\u4e0b|\u641c\u7d22|\u8054\u7f51|\u4e0a\u7f51|\u67e5\u8bc1|\u6838\u5b9e|\u4ef7\u683c|\u6c47\u7387|\u7248\u672c|\u6587\u6863|\u5b98\u7f51)/,
+];
+
+interface SearchTraitSignal {
+  dimension: string;
+  value: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface SearchSkillHookParams {
+  traits?: SearchTraitSignal[];
+  loadSkill?: (skillName: string) => Promise<unknown>;
+  getLoadedSkills?: () => Array<{ name: string }>;
+}
+
+interface SearchHookService {
+  register?: (
+    ctx: Context,
+    def: {
+      type: "agent";
+      phase: "before";
+      metadata?: Record<string, unknown>;
+      handler: (ctx: { params: SearchSkillHookParams }) => Promise<void>;
+    },
+  ) => () => void;
+}
+
+function extractTriggerContent(signals: SearchTraitSignal[]): string {
+  for (let i = signals.length - 1; i >= 0; i--) {
+    const content = signals[i]?.metadata?.triggerContent;
+    if (typeof content === "string" && content.trim()) {
+      return content.trim();
+    }
+  }
+
+  return "";
+}
+
+function shouldActivateSearchSkill(signals: SearchTraitSignal[]): boolean {
+  if (signals.some((signal) => signal.dimension === "intent" && signal.value === "search")) {
+    return true;
+  }
+
+  const triggerContent = extractTriggerContent(signals);
+  if (!triggerContent) {
+    return false;
+  }
+
+  return SEARCH_HINT_PATTERNS.some((pattern) => pattern.test(triggerContent));
+}
+
+function readFetchUrl(params: Record<string, unknown>): string | null {
+  const raw = params.url;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
 
 @Metadata({ name: "search", description: "Web search tool" })
 export default class SearchPlugin extends YesImPlugin {
@@ -36,7 +107,8 @@ export default class SearchPlugin extends YesImPlugin {
   });
   private config: SearchPluginConfig;
 
-  private disposeSkills: (() => void)[] = [];
+  private disposeSkills: Array<() => void> = [];
+  private disposeHook: (() => void) | null = null;
 
   constructor(ctx: Context, config: SearchPluginConfig) {
     super(ctx);
@@ -48,7 +120,7 @@ export default class SearchPlugin extends YesImPlugin {
   private async start(): Promise<void> {
     const backend: SearchBackend = new TavilyBackend(this.ctx, this.config);
     this.registerTool({
-      name: "search",
+      name: SEARCH_SKILL_NAME,
       description:
         "Search the web for current information, news, facts, or web content. " +
         "Use when user asks about recent events, needs fact-checking, or requires information " +
@@ -70,7 +142,10 @@ export default class SearchPlugin extends YesImPlugin {
         if (results.length === 0) return Success("No results found.");
 
         const formatted = results
-          .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+          .map(
+            (result, index) =>
+              `${index + 1}. ${result.title}\n   ${result.url}\n   ${result.snippet}`,
+          )
           .join("\n\n");
 
         return Success(formatted);
@@ -78,11 +153,42 @@ export default class SearchPlugin extends YesImPlugin {
     });
 
     const skills = loadSkillsFromDir(builtinSkillsDir);
-    this.disposeSkills = skills.map((s) => this.ctx["yesimbot.skill"].register(s));
+    this.disposeSkills = skills.map((skill) => this.ctx["yesimbot.skill"].register(skill));
+
+    const hookService = (this.ctx as Context & { "yesimbot.hook"?: SearchHookService })[
+      "yesimbot.hook"
+    ];
+
+    if (!this.disposeHook && typeof hookService?.register === "function") {
+      this.disposeHook = hookService.register(this.ctx, {
+        type: "agent",
+        phase: "before",
+        metadata: { source: "search-service" },
+        handler: async (hookCtx) => {
+          const params = hookCtx.params;
+
+          if (
+            typeof params.getLoadedSkills === "function" &&
+            params.getLoadedSkills().some((skill) => skill.name === SEARCH_SKILL_NAME)
+          ) {
+            return;
+          }
+
+          if (
+            typeof params.loadSkill === "function" &&
+            shouldActivateSearchSkill(params.traits ?? [])
+          ) {
+            await params.loadSkill(SEARCH_SKILL_NAME);
+          }
+        },
+      });
+    }
   }
 
   private async dispose(): Promise<void> {
-    this.disposeSkills.forEach((d) => d());
+    this.disposeSkills.forEach((dispose) => dispose());
+    this.disposeHook?.();
+    this.disposeHook = null;
   }
 
   @Tool({
@@ -98,24 +204,36 @@ export default class SearchPlugin extends YesImPlugin {
     }),
     hidden: true,
   })
-  private async fetch(url: string): Promise<ToolResult<string | unknown>> {
-    if (!this.config.jinaApiKey) {
-      return Failed("Jina AI API key not configured. Please set jinaApiKey in plugin config.");
+  private async fetch(params: Record<string, unknown>): Promise<ToolResult<string | unknown>> {
+    const url = readFetchUrl(params);
+    if (!url) {
+      return Failed("Invalid URL. Please provide a valid http/https URL.");
     }
 
-    const response = await this.ctx.http.get(`https://r.jina.ai/${encodeURIComponent(url)}`, {
-      timeout: 15000,
-      headers: {
-        Authorization: `Bearer ${this.config.jinaApiKey}`,
-      },
-    });
-    if (response.status !== 200) {
-      return Failed(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+    try {
+      const headers: Record<string, string> = {};
+      if (this.config.jinaApiKey) {
+        headers["Authorization"] = `Bearer ${this.config.jinaApiKey}`;
+      }
+
+      const response = await this.ctx.http<string>(`https://r.jina.ai/${encodeURIComponent(url)}`, {
+        responseType: "text",
+        timeout: 30000,
+        validateStatus: () => true,
+        headers,
+      });
+
+      if (response.status !== 200) {
+        return Failed(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+      }
+
+      if (typeof response.data !== "string") {
+        return Failed("Unexpected response format from Jina AI Reader");
+      }
+
+      return Success(response.data);
+    } catch (err) {
+      return Failed(err instanceof Error ? err.message : String(err));
     }
-    const data = response.data;
-    if (typeof data !== "string") {
-      return Failed("Unexpected response format from Jina AI Reader");
-    }
-    return Success(data);
   }
 }

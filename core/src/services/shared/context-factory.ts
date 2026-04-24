@@ -16,12 +16,21 @@ import {
 import type { CapabilityState, Percept, RoundContext, Scenario } from "../runtime/contracts";
 import { LoadedSkillSet } from "../skill/loaded-skill-set";
 import type { SkillRegistry } from "../skill/service";
+import { projectSkillState, type AgentSessionStore } from "../skill/session-store";
+import type { SkillDefinition } from "../skill/types";
 import type { TraitAnalyzer } from "../trait/service";
 import type { ActiveSkill, TraitSignal } from "./types";
 
 export interface AgentRoundContextResult {
   toolCtx: ToolExecutionContext;
   roundContext: RoundContext;
+}
+
+function getOptionalService<T>(ctx: Context, name: string): T | undefined {
+  return (
+    (typeof ctx.get === "function" ? ctx.get(name) : undefined) ??
+    ((ctx as Context & Record<string, T | undefined>)[name] as T | undefined)
+  );
 }
 
 interface AgentRoundContextParams {
@@ -93,6 +102,7 @@ export async function buildAgentContext(
     session?: Session;
     bot?: Bot;
     percept: Percept;
+    analyzeTraits?: boolean;
   },
 ): Promise<ToolExecutionContext> {
   const logger = ctx.logger("context-factory");
@@ -110,12 +120,10 @@ export async function buildAgentContext(
   } catch (err) {
     missingFields.push("view");
     logger.warn(
-      `[${params.percept.traceId}] ToolExecutionContext incomplete: failed to build view — ${err instanceof Error ? err.message : String(err)}`,
+      `[${params.percept.traceId}] ToolExecutionContext incomplete: failed to build view - ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  let traits: TraitSignal[] = [];
-  const skills: ActiveSkill[] = [];
   const normalizedView = normalizeViewForScenario(view, {
     platform: params.platform,
     channelId: params.channelId,
@@ -126,17 +134,22 @@ export async function buildAgentContext(
     stimulusSource: buildStimulusSource(params.percept),
   });
 
-  if (normalizedView) {
+  let traits: TraitSignal[] = [];
+  const traitAnalyzer = getOptionalService<TraitAnalyzer>(ctx, "yesimbot.trait");
+  const shouldAnalyzeTraits = params.analyzeTraits ?? true;
+  if (shouldAnalyzeTraits && traitAnalyzer && typeof traitAnalyzer.analyze === "function") {
     try {
-      const traitAnalyzer = ctx["yesimbot.trait"] as TraitAnalyzer;
       traits = await traitAnalyzer.analyze(key, scenario);
     } catch (err) {
       missingFields.push("traits");
       logger.warn(
-        `[${params.percept.traceId}] ToolExecutionContext incomplete: failed to analyze traits — ${err instanceof Error ? err.message : String(err)}`,
+        `[${params.percept.traceId}] ToolExecutionContext incomplete: failed to analyze traits - ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
+
+  const sessionState = peekSessionState(ctx, params.platform, params.channelId);
+  const skills = toActiveSkills(resolveSessionSkills(ctx, sessionState));
 
   if (missingFields.length > 0) {
     logger.warn(
@@ -161,7 +174,7 @@ export async function buildAgentRoundContext(
   params: AgentRoundContextParams,
 ): Promise<AgentRoundContextResult> {
   const toolCtx = await resolveAgentToolContext(ctx, params);
-  const baseline = buildRoundContextBaseline(toolCtx, params);
+  const baseline = buildRoundContextBaseline(ctx, toolCtx, params);
   const roundContext = calibrateRoundContext(toolCtx.roundContext, baseline);
 
   const runtimeAwareToolCtx = bindCommittedRoundContext(
@@ -183,11 +196,16 @@ async function resolveAgentToolContext(
   params: AgentRoundContextParams,
 ): Promise<ToolExecutionContext> {
   const inboundToolCtx = params.toolCtx;
-  const hasInboundRuntimeFields =
-    inboundToolCtx?.scenario !== undefined &&
-    inboundToolCtx?.traits !== undefined &&
-    inboundToolCtx?.skills !== undefined;
-  const builtToolCtx = hasInboundRuntimeFields ? undefined : await buildAgentContext(ctx, params);
+  const shouldBuildContext =
+    inboundToolCtx?.scenario === undefined ||
+    inboundToolCtx?.traits === undefined ||
+    inboundToolCtx?.skills === undefined;
+  const builtToolCtx = shouldBuildContext
+    ? await buildAgentContext(ctx, {
+        ...params,
+        analyzeTraits: inboundToolCtx?.traits === undefined,
+      })
+    : undefined;
 
   return {
     platform: params.platform,
@@ -204,6 +222,7 @@ async function resolveAgentToolContext(
 }
 
 function buildRoundContextBaseline(
+  ctx: Context,
   toolCtx: ToolExecutionContext,
   params: AgentRoundContextParams,
 ): RoundContextBaseline {
@@ -213,6 +232,8 @@ function buildRoundContextBaseline(
       view: createFallbackView(params),
       stimulusSource: buildStimulusSource(params.percept),
     });
+
+  const sessionState = peekSessionState(ctx, params.platform, params.channelId);
 
   return {
     percept: params.percept,
@@ -227,9 +248,11 @@ function buildRoundContextBaseline(
       channelKey: `${params.platform}:${params.channelId}`,
       traceId: params.percept.traceId,
     },
-    skillState: {
-      active: (toolCtx.skills ?? []).map((skill) => skill.name),
-    },
+    skillState:
+      sessionState ??
+      ({
+        active: (toolCtx.skills ?? []).map((skill) => skill.name),
+      } satisfies RoundContext["skillState"]),
   };
 }
 
@@ -356,4 +379,40 @@ function normalizeViewForScenario(
     entities: Array.isArray(view.entities) ? view.entities : [],
     history: Array.isArray(view.history) ? view.history : [],
   };
+}
+
+function peekSessionState(
+  ctx: Context,
+  platform: string,
+  channelId: string,
+): RoundContext["skillState"] | undefined {
+  const sessionStore = getOptionalService<AgentSessionStore>(ctx, "yesimbot.session");
+  if (!sessionStore || typeof sessionStore.getState !== "function") {
+    return undefined;
+  }
+  return projectSkillState(sessionStore.getState(platform, channelId));
+}
+
+function resolveSessionSkills(
+  ctx: Context,
+  sessionState: RoundContext["skillState"] | undefined,
+): SkillDefinition[] {
+  const active = sessionState?.active ?? [];
+  if (active.length === 0) {
+    return [];
+  }
+
+  const catalog = getOptionalService<SkillRegistry>(ctx, "yesimbot.skill");
+  return active.flatMap((skillName) => {
+    const definition = catalog?.get(skillName);
+    return definition ? [definition] : [];
+  });
+}
+
+function toActiveSkills(skills: SkillDefinition[]): ActiveSkill[] {
+  return skills.map((skill) => ({
+    name: skill.name,
+    effects: skill.allowedTools?.length ? ["tools"] : ["guidance"],
+    metadata: { description: skill.description, allowedTools: skill.allowedTools ?? [] },
+  }));
 }

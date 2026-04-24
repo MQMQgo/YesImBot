@@ -6,10 +6,13 @@ import { HorizonService } from "../src/services/horizon/service";
 
 // Mock SummaryCompressor to verify constructor parameters
 vi.mock("../src/services/horizon/compressor", () => {
-  return {
-    SummaryCompressor: vi.fn().mockImplementation(() => ({
+  const SummaryCompressorMock = vi.fn(function SummaryCompressorMock() {
+    return {
       maybeCompress: vi.fn(),
-    })),
+    };
+  });
+  return {
+    SummaryCompressor: SummaryCompressorMock,
   };
 });
 

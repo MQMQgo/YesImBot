@@ -6,8 +6,8 @@ import type {
   Percept,
   RoundContext,
   Scenario,
-} from "../runtime/contracts";
-import type { ActiveSkill } from "../shared/types";
+} from "../../runtime/contracts";
+import type { ActiveSkill } from "../../shared/types";
 import type { YesImPlugin } from "./plugin";
 
 export interface TraitSignal {
@@ -58,6 +58,12 @@ export interface FunctionDefinition {
   onCapabilityMissing?: "remove" | "hint";
   /** Hidden tools are excluded from getTools() unless explicitly included via skill toolFilter */
   hidden?: boolean;
+}
+
+export interface Activator {
+  check: (ctx: ToolExecutionContext & Record<string, unknown>) => boolean;
+  reason?: string;
+  onFail?: "remove" | "hint";
 }
 
 export interface CapabilityResolver {

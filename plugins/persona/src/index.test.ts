@@ -72,7 +72,7 @@ describe("persona plugin", () => {
     });
 
     expect(registerFragmentSource).toHaveBeenCalledTimes(1);
-    expect(registerFragmentSource).toHaveBeenCalledWith("persona", expect.any(Function));
+    expect(registerFragmentSource).toHaveBeenCalledWith("persona-plugin", expect.any(Function));
     expect(on).toHaveBeenCalledWith("dispose", expect.any(Function));
 
     const fragments = await registeredProvider?.({});

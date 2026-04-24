@@ -13,6 +13,7 @@ import type { HookServiceConfig } from "./services/hook/types";
 import type { HorizonServiceConfig } from "./services/horizon";
 import { HorizonService } from "./services/horizon";
 import { ImageCacheService } from "./services/image-cache/service";
+import type { ImageCacheConfig } from "./services/image-cache/types";
 import type { MemoryAgentServiceConfig } from "./services/memory-agent";
 import { MemoryAgentService } from "./services/memory-agent";
 import type { ModelServiceConfig } from "./services/model";
@@ -21,12 +22,17 @@ import type { PluginServiceConfig } from "./services/plugin";
 import { PluginService } from "./services/plugin";
 import type { PromptServiceConfig } from "./services/prompt";
 import { PromptService } from "./services/prompt";
-import type { RoleServiceConfig } from "./services/role";
-import { RoleService } from "./services/role";
+import type { PersonaServiceConfig } from "./services/role";
+import { PersonaService } from "./services/role";
 import type { SkillRegistryConfig } from "./services/skill";
-import { SkillRegistry } from "./services/skill";
+import { AgentSessionStore, SkillRegistry } from "./services/skill";
 import type { TraitAnalyzerConfig } from "./services/trait";
 import { TraitAnalyzer } from "./services/trait";
+import {
+  DEFAULT_IMAGE_DESCRIPTION_DETAIL,
+  DEFAULT_IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS,
+  DEFAULT_IMAGE_DESCRIPTION_PROMPT,
+} from "./services/horizon/types";
 
 export const name = "yesimbot";
 export const inject = ["database"];
@@ -90,20 +96,21 @@ export type Config = AgentCoreConfig &
   HorizonServiceConfig &
   ModelServiceConfig &
   PluginServiceConfig &
-  PromptServiceConfig &
-  RoleServiceConfig &
+  PromptServiceConfig & {
+    timeout?: number;
+  } & PersonaServiceConfig &
   SkillRegistryConfig &
   TraitAnalyzerConfig &
   MemoryAgentServiceConfig &
-  HookServiceConfig & { arousal: ArousalConfig };
+  HookServiceConfig & {
+    arousal: ArousalConfig;
+    imageCache: ImageCacheConfig;
+  };
 
 export const Config: Schema<Config> = Schema.intersect([
   // ── 基础 ──
   Schema.object({
-    model: Schema.dynamic("registry.chatModels"),
-    summaryModel: Schema.dynamic("registry.chatModels"),
-    fallbackChain: Schema.array(Schema.dynamic("registry.chatModels")).default([]),
-    errorReportChannel: Schema.string(),
+    errorReportChannel: Schema.string().default(""),
     allowedChannels: Schema.array(
       Schema.object({
         platform: Schema.string().required(),
@@ -114,81 +121,94 @@ export const Config: Schema<Config> = Schema.intersect([
       .default([])
       .role("table"),
     keywords: Schema.array(Schema.string()).default([]),
-    compressionThreshold: Schema.number()
-      .default(100)
-      .description("Event count to trigger timeline compression"),
-    inactivityTriggerMs: Schema.number()
-      .default(3600000)
-      .description("Inactivity period (ms) to trigger timeline compression (default: 1 hour)"),
-    retainRecentEntries: Schema.number()
-      .default(10)
-      .description("Keep N most recent timeline entries uncompressed"),
+    debugLevel: Schema.number().min(0).max(3).step(1).default(2),
   }),
 
   // ── 模型 ──
   Schema.object({
-    maxRounds: Schema.number().default(3),
+    model: Schema.dynamic("registry.chatModels"),
+    summaryModel: Schema.dynamic("registry.chatModels"),
+    fallbackChain: Schema.array(Schema.dynamic("registry.chatModels")).default([]),
+    maxRounds: Schema.number().min(1).max(20).step(1).default(3),
     streamMode: Schema.boolean().default(false),
-    globalTimeout: Schema.number().default(120000),
-    maxToolResultLength: Schema.number().default(4000),
-    concurrency: Schema.number().default(5),
+    globalTimeout: Schema.number().min(1000).max(600000).step(1000).default(120000),
+    maxToolResultLength: Schema.number().min(256).max(64000).step(1).default(4000),
+    concurrency: Schema.number().min(1).max(32).step(1).default(5),
   }),
 
   // ── 意愿值 ──
   Schema.object({
     willingness: WillingnessSchema,
-    aggregationWindow: Schema.number().default(1500),
+    aggregationWindow: Schema.number().min(200).max(30000).step(100).default(1500),
   }),
 
   // ── 提示词 ──
   Schema.object({
-    templates: Schema.dict(Schema.string()),
-    timeout: Schema.number().default(5000),
+    templates: Schema.dict(Schema.string()).default({}),
+    timeout: Schema.number().min(100).max(60000).step(100).default(5000),
     rolePath: Schema.path({ filters: ["directory"], allowCreate: true }).default(
       "data/yesimbot/roles",
     ),
     skillPaths: Schema.array(Schema.path({ filters: ["directory"], allowCreate: true }))
       .default(["node_modules/koishi-plugin-yesimbot/resources/skills"])
       .role("table"),
-    confidenceThreshold: Schema.number().default(0.3),
-    stickyDefaultTimeout: Schema.number().default(3),
+    confidenceThreshold: Schema.number().min(0).max(1).step(0.01).default(0.3),
+    stickyDefaultTimeout: Schema.number().min(1).max(30).step(1).default(3),
   }),
 
-  // ── 高级 ──
+  // ── 图片 ──
   Schema.object({
-    enableThoughts: Schema.boolean().default(true),
-    charBudget: Schema.number().default(30000),
-    keepLastRounds: Schema.number().default(2),
-    softTrimHead: Schema.number().default(800),
-    softTrimTail: Schema.number().default(800),
-    initialContextCharBudget: Schema.number().default(20000),
-    historyLimit: Schema.number().default(30),
-    archiveThresholdMs: Schema.number().default(86400000),
-    entityCacheTtl: Schema.number().default(3600000),
-    maxActiveEntities: Schema.number().default(15),
-    defaultTimeout: Schema.number().default(30000),
-    debugLevel: Schema.union([
-      Schema.const(0),
-      Schema.const(1),
-      Schema.const(2),
-      Schema.const(3),
-    ]).default(2),
-    imageMode: Schema.union([Schema.const("native"), Schema.const("off")]).default("native"),
-    maxImagesInContext: Schema.number().default(3),
-    imageLifecycleCount: Schema.number().default(3),
-    hookTimeouts: Schema.object({
-      tool: Schema.number().default(3000).description("Tool hook timeout in ms"),
-      message: Schema.number().default(1000).description("Message hook timeout in ms"),
-      agent: Schema.number().default(5000).description("Agent hook timeout in ms"),
+    imageMode: Schema.union(["native", "description", "off"])
+      .default("native")
+      .description("图片处理模式：原生多模态、识图转文字、或关闭"),
+    maxImagesInContext: Schema.number().min(0).max(10).step(1).default(3),
+    imageLifecycleCount: Schema.number().min(0).max(20).step(1).default(3),
+    imageDescription: Schema.object({
+      model: Schema.dynamic("registry.chatModels").default(""),
+      fallbackChain: Schema.array(Schema.dynamic("registry.chatModels")).default([]),
+      detail: Schema.union(["low", "high", "auto"]).default(DEFAULT_IMAGE_DESCRIPTION_DETAIL),
+      prompt: Schema.string()
+        .role("textarea", { rows: [3, 6] })
+        .default(DEFAULT_IMAGE_DESCRIPTION_PROMPT),
+      maxOutputTokens: Schema.number()
+        .min(32)
+        .max(2048)
+        .step(1)
+        .default(DEFAULT_IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS),
+    })
+      .default({
+        model: "",
+        fallbackChain: [],
+        detail: DEFAULT_IMAGE_DESCRIPTION_DETAIL,
+        prompt: DEFAULT_IMAGE_DESCRIPTION_PROMPT,
+        maxOutputTokens: DEFAULT_IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS,
+      })
+      .description("imageMode=description 时使用的识图配置"),
+    imageCache: Schema.object({
+      autoCleanupEnabled: Schema.boolean().default(true),
+      maxCachedImages: Schema.number().min(1).max(20000).step(1).default(1000),
+      imageTtlMs: Schema.number()
+        .min(60000)
+        .max(90 * 24 * 60 * 60 * 1000)
+        .step(1000)
+        .default(7 * 24 * 60 * 60 * 1000),
+      flushIntervalMs: Schema.number().min(1000).max(3600000).step(1000).default(30000),
+      cleanupIntervalMs: Schema.number().min(1000).max(86400000).step(1000).default(3600000),
+    }).default({
+      autoCleanupEnabled: true,
+      maxCachedImages: 1000,
+      imageTtlMs: 7 * 24 * 60 * 60 * 1000,
+      flushIntervalMs: 30000,
+      cleanupIntervalMs: 3600000,
     }),
   }),
 
   // ── 记忆代理 ──
   Schema.object({
     memoryAgent: Schema.object({
-      coreMemoryBudget: Schema.number().default(2000),
+      coreMemoryBudget: Schema.number().min(256).max(20000).step(1).default(2000),
       summaryModel: Schema.dynamic("registry.chatModels"),
-      maxAgentSteps: Schema.number().default(15),
+      maxAgentSteps: Schema.number().min(1).max(100).step(1).default(15),
     }),
   }),
 
@@ -196,10 +216,41 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     arousal: Schema.object({
       enabled: Schema.boolean().default(false),
-      heartbeatIntervalMs: Schema.number().default(1800000),
+      heartbeatIntervalMs: Schema.number().min(1000).max(86400000).step(1000).default(1800000),
       excludeChannels: Schema.array(Schema.string()).default([]),
-      dailyMessageLimit: Schema.number().default(3),
+      dailyMessageLimit: Schema.number().min(1).max(100).step(1).default(3),
       evaluationModel: Schema.dynamic("registry.chatModels"),
+    }),
+  }),
+
+  // ── 上下文管理 ──
+  Schema.object({
+    compressionThreshold: Schema.number().min(1).max(1000).step(1).default(100),
+    inactivityTriggerMs: Schema.number().min(1000).max(604800000).step(1000).default(3600000),
+    retainRecentEntries: Schema.number().min(1).max(100).step(1).default(10),
+    historyLimit: Schema.number().min(1).max(500).step(1).default(30),
+    archiveThresholdMs: Schema.number().min(1000).max(2592000000).step(1000).default(86400000),
+    entityCacheTtl: Schema.number().min(1000).max(604800000).step(1000).default(3600000),
+    maxActiveEntities: Schema.number().min(1).max(1000).step(1).default(15),
+  }),
+
+  // ── 高级 ──
+  Schema.object({
+    defaultTimeout: Schema.number().min(100).max(600000).step(100).default(30000),
+    enableThoughts: Schema.boolean().default(true),
+    charBudget: Schema.number().min(1000).max(120000).step(100).default(30000),
+    keepLastRounds: Schema.number().min(0).max(20).step(1).default(2),
+    softTrimHead: Schema.number().min(0).max(10000).step(50).default(800),
+    softTrimTail: Schema.number().min(0).max(10000).step(50).default(800),
+    initialContextCharBudget: Schema.number().min(1000).max(120000).step(100).default(20000),
+    hookTimeouts: Schema.object({
+      tool: Schema.number().min(1000).max(60000).step(100).default(3000),
+      message: Schema.number().min(100).max(60000).step(100).default(1000),
+      agent: Schema.number().min(1000).max(120000).step(100).default(5000),
+    }).default({
+      tool: 3000,
+      message: 1000,
+      agent: 5000,
     }),
   }),
 ]).i18n({
@@ -210,9 +261,15 @@ export const Config: Schema<Config> = Schema.intersect([
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger("yesimbot");
   const command = ctx.command("yesimbot", "Yes! I'm Bot! 指令集", { authority: 3 });
-  ctx.plugin(ImageCacheService);
-  ctx.plugin(FormatterService);
-  ctx.plugin(ModelService, { concurrency: config.concurrency });
+
+  ctx.plugin(ImageCacheService, { ...config.imageCache, debugLevel: config.debugLevel });
+  ctx.plugin(FormatterService, { debugLevel: config.debugLevel });
+  ctx.plugin(ModelService, { concurrency: config.concurrency, debugLevel: config.debugLevel });
+  ctx.plugin(HookService, {
+    hookTimeouts: config.hookTimeouts,
+    logLevel: config.debugLevel,
+    debugLevel: config.debugLevel,
+  });
   ctx.plugin(HorizonService, {
     allowedChannels: config.allowedChannels ?? [],
     keywords: config.keywords,
@@ -225,22 +282,29 @@ export function apply(ctx: Context, config: Config) {
     compressionThreshold: config.compressionThreshold,
     inactivityTriggerMs: config.inactivityTriggerMs,
     retainRecentEntries: config.retainRecentEntries,
-  });
-  ctx.plugin(PromptService, { templates: config.templates });
-  ctx.plugin(RoleService, { rolePath: config.rolePath });
-  ctx.plugin(HookService, {
-    hookTimeouts: config.hookTimeouts,
-    logLevel: config.debugLevel,
+    debugLevel: config.debugLevel,
   });
   ctx.plugin(PluginService, {
     defaultTimeout: config.defaultTimeout,
+    debugLevel: config.debugLevel,
   });
-  ctx.plugin(TraitAnalyzer, {});
+  ctx.plugin(PromptService, {
+    templates: config.templates,
+    renderTimeout: config.timeout,
+    debugLevel: config.debugLevel,
+  });
+  ctx.plugin(PersonaService, {
+    rolePath: config.rolePath,
+    debugLevel: config.debugLevel,
+  });
   ctx.plugin(SkillRegistry, {
     skillPaths: config.skillPaths,
     confidenceThreshold: config.confidenceThreshold,
     stickyDefaultTimeout: config.stickyDefaultTimeout,
+    debugLevel: config.debugLevel,
   });
+  ctx.plugin(AgentSessionStore);
+  ctx.plugin(TraitAnalyzer, { debugLevel: config.debugLevel });
   ctx.plugin(AgentCore, {
     model: config.model,
     fallbackChain: config.fallbackChain,
@@ -248,17 +312,29 @@ export function apply(ctx: Context, config: Config) {
     streamMode: config.streamMode,
     globalTimeout: config.globalTimeout,
     maxToolResultLength: config.maxToolResultLength,
+    enableThoughts: config.enableThoughts,
+    charBudget: config.charBudget,
+    keepLastRounds: config.keepLastRounds,
+    softTrimHead: config.softTrimHead,
+    softTrimTail: config.softTrimTail,
+    initialContextCharBudget: config.initialContextCharBudget,
     willingness: config.willingness,
+    aggregationWindow: config.aggregationWindow,
     errorReportChannel: config.errorReportChannel,
     debugLevel: config.debugLevel,
     imageMode: config.imageMode,
     maxImagesInContext: config.maxImagesInContext,
     imageLifecycleCount: config.imageLifecycleCount,
+    imageDescription: config.imageDescription,
   });
   ctx.plugin(MemoryAgentService, {
     memoryAgent: config.memoryAgent,
+    debugLevel: config.debugLevel,
   });
-  ctx.plugin(ArousalService, config.arousal);
+  ctx.plugin(ArousalService, {
+    ...config.arousal,
+    debugLevel: config.debugLevel,
+  });
 
   ctx.on("ready", () => {
     logger.info("YesImBot core plugin initialized");

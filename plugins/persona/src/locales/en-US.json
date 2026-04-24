@@ -1,0 +1,8 @@
+{
+  "_config": {
+    "name": "Name",
+    "personality": "Core personality",
+    "tone": "Tone & style",
+    "extra": "Free-form supplement (multi-line, conversation examples, etc.)"
+  }
+}

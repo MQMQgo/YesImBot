@@ -1,7 +1,12 @@
 export { HandlebarsRenderer } from "./renderer";
 export { HelperRegistry, registerBuiltinHelpers } from "./helpers";
 export { PromptService, PromptServiceConfigSchema } from "./service";
-export type { PromptServiceConfig } from "./service";
+export type {
+  PromptEmitBlocks,
+  PromptEmitOptions,
+  PromptRenderOptions,
+  PromptServiceConfig,
+} from "./service";
 export type {
   FragmentSource,
   FragmentStability,

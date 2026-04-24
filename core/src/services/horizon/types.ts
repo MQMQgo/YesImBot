@@ -1,7 +1,7 @@
 import type { UserContent } from "ai";
 import type { Session } from "koishi";
 
-import type { ChannelKey, Scenario, TriggerType } from "../runtime/contracts";
+import type { ChannelKey, Scenario, TriggerType } from "../../runtime/contracts";
 
 export type AllowedChannel = { platform: string; type: "private" | "guild"; id: string };
 
@@ -162,10 +162,32 @@ export interface SelfInfo {
 
 // ---- Image Config ----
 
+export type ImageMode = "native" | "description" | "off";
+export type ImageDescriptionDetail = "low" | "high" | "auto";
+
+export const DEFAULT_IMAGE_DESCRIPTION_PROMPT = [
+  "请为另一个只能读取文本的聊天模型描述这张图片。",
+  "请客观描述可见内容、人物或物体、动作、场景、表情、画面中的文字，",
+  "如果这是表情包、梗图或截图，也请说明它传达的语气和关键上下文。",
+  "输出简洁但信息充分，不要臆测看不见的细节。",
+].join("");
+
+export const DEFAULT_IMAGE_DESCRIPTION_DETAIL: ImageDescriptionDetail = "low";
+export const DEFAULT_IMAGE_DESCRIPTION_MAX_OUTPUT_TOKENS = 256;
+
+export interface ImageDescriptionConfig {
+  model?: string;
+  fallbackChain?: string[];
+  detail?: ImageDescriptionDetail;
+  prompt?: string;
+  maxOutputTokens?: number;
+}
+
 export interface ImageConfig {
-  imageMode: "native" | "off";
+  imageMode: ImageMode;
   maxImagesInContext: number;
   imageLifecycleCount: number;
+  description?: ImageDescriptionConfig;
 }
 
 // ---- Observation (TEMPORARY - will be removed in Plan 02) ----

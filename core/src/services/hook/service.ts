@@ -35,7 +35,7 @@ export class HookService extends Service<HookServiceConfig> {
     this.config = hookConfig ?? {};
     this.eventContext = ctx;
     this.logger = ctx.logger("yesimbot.hook");
-    this.logger.level = this.config.logLevel ?? 2;
+    this.logger.level = this.config.debugLevel ?? this.config.logLevel ?? 2;
     const hookTimeouts: HookTimeoutsConfig = hookConfig?.hookTimeouts ?? {};
     this.timeouts = {
       [HookType.Tool]: hookTimeouts.tool ?? DEFAULT_HOOK_TIMEOUTS.tool,

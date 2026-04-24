@@ -215,6 +215,7 @@ export default class StickerManager extends YesImPlugin {
   static inject = [
     "database",
     "yesimbot.plugin",
+    "yesimbot.hook",
     "yesimbot.model",
     "yesimbot.prompt",
     "yesimbot.image-cache",

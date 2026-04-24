@@ -29,11 +29,8 @@ export type StreamResult = Awaited<ReturnType<typeof streamText>>;
 
 export interface ModelServiceConfig {
   concurrency?: number;
+  debugLevel?: number;
 }
-
-export const ModelServiceConfigSchema: Schema<ModelServiceConfig> = Schema.object({
-  concurrency: Schema.number().default(5),
-});
 
 export class ModelService extends Service<ModelServiceConfig> implements IModelService {
   private providers = new Map<string, IModelProvider>();
@@ -45,6 +42,7 @@ export class ModelService extends Service<ModelServiceConfig> implements IModelS
     this.config = config;
     this.queue = new PQueue({ concurrency: config.concurrency || 5 });
     this.logger = ctx.logger("yesimbot.model");
+    this.logger.level = config.debugLevel ?? 2;
     const command = this.ctx.command("yesimbot.model", "模型指令集", { authority: 3 });
 
     command
@@ -179,18 +177,10 @@ export class ModelService extends Service<ModelServiceConfig> implements IModelS
     params: CallParams,
     fallbackChain?: string[],
   ): Promise<GenerateResult | undefined> {
-    const { provider, modelId } = this.resolveModel(model);
-
     const result = await this.queue.add(async () => {
-      try {
-        return await this.withRetry(() => this.executeCall(provider, modelId, params));
-      } catch (error) {
-        const category = classifyError(error);
-        if (category === ErrorCategory.TRANSIENT || category === ErrorCategory.RATE_LIMIT) {
-          return await this.handleFallback(params, error, fallbackChain);
-        }
-        throw error;
-      }
+      return await this.executeWithFallbackChain(model, fallbackChain, ({ provider, modelId }) =>
+        this.withRetry(() => this.executeCall(provider, modelId, params)),
+      );
     });
     return result ?? undefined;
   }
@@ -248,18 +238,10 @@ export class ModelService extends Service<ModelServiceConfig> implements IModelS
     params: CallParams,
     fallbackChain?: string[],
   ): Promise<StreamResult> {
-    const { provider, modelId } = this.resolveModel(model);
-
     const result = await this.queue.add(async () => {
-      try {
-        return await this.withRetry(() => this.executeStreamCall(provider, modelId, params));
-      } catch (error) {
-        const category = classifyError(error);
-        if (category === ErrorCategory.TRANSIENT || category === ErrorCategory.RATE_LIMIT) {
-          return await this.handleStreamFallback(params, error, fallbackChain);
-        }
-        throw error;
-      }
+      return await this.executeWithFallbackChain(model, fallbackChain, ({ provider, modelId }) =>
+        this.withRetry(() => this.executeStreamCall(provider, modelId, params)),
+      );
     });
     if (!result) throw new Error("Queue returned undefined for stream call");
     return result;
@@ -283,41 +265,66 @@ export class ModelService extends Service<ModelServiceConfig> implements IModelS
     return new Map(this.usage);
   }
 
-  private async handleFallback(params: CallParams, error: unknown, chain?: string[]) {
-    if (!chain || chain.length === 0) throw error;
+  private async executeWithFallbackChain<T>(
+    primary: string | ModelSelector,
+    chain: string[] | undefined,
+    runner: (candidate: { provider: string; modelId: string }) => Promise<T>,
+  ): Promise<T> {
+    const candidates = this.buildModelCandidates(primary, chain);
+    let primaryError: unknown;
+    let lastError: unknown;
 
-    for (const fallback of chain) {
-      const parsed = parseModelId(fallback);
-      if (!parsed) continue;
-      const { provider, model } = parsed;
-      if (!provider || !model) continue;
+    for (const candidate of candidates) {
       try {
-        this.logger.warn(`Trying fallback chain model: ${fallback}`);
-        return await this.executeCall(provider, model, params);
-      } catch (e) {
-        continue;
+        const resolved = this.resolveModel(candidate.model);
+        if (!candidate.primary) {
+          this.logger.warn(`Trying fallback chain model: ${candidate.label}`);
+        }
+        return await runner(resolved);
+      } catch (error) {
+        lastError = error;
+        if (candidate.primary) {
+          primaryError = error;
+          if (!chain?.length) {
+            throw error;
+          }
+          this.logger.warn(
+            `Primary model failed, switching to fallback chain: ${candidate.label} (${this.formatError(error)})`,
+          );
+          continue;
+        }
+
+        this.logger.warn(
+          `Fallback model failed: ${candidate.label} (${this.formatError(error)})`,
+        );
       }
     }
 
-    throw error;
+    throw primaryError ?? lastError ?? new Error("No model candidate succeeded");
   }
 
-  private async handleStreamFallback(params: CallParams, error: unknown, chain?: string[]) {
-    if (!chain || chain.length === 0) throw error;
+  private buildModelCandidates(primary: string | ModelSelector, chain?: string[]) {
+    const entries: Array<{ model: string | ModelSelector; label: string; primary: boolean }> = [];
+    const seen = new Set<string>();
+    const push = (model: string | ModelSelector, isPrimary: boolean) => {
+      const label = this.describeModel(model);
+      if (seen.has(label)) return;
+      seen.add(label);
+      entries.push({ model, label, primary: isPrimary });
+    };
 
-    for (const fallback of chain) {
-      const parsed = parseModelId(fallback);
-      if (!parsed) continue;
-      const { provider, model } = parsed;
-      if (!provider || !model) continue;
-      try {
-        this.logger.warn(`Trying fallback chain model: ${fallback}`);
-        return await this.executeStreamCall(provider, model, params);
-      } catch (e) {
-        continue;
-      }
+    push(primary, true);
+    for (const fallback of chain ?? []) {
+      push(fallback, false);
     }
+    return entries;
+  }
 
-    throw error;
+  private describeModel(model: string | ModelSelector): string {
+    return typeof model === "string" ? model : `${model.provider}:${model.model}`;
+  }
+
+  private formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
